@@ -1,0 +1,31 @@
+[configuration]
+
+entry_symbol = "godot_ai_os_library_init"
+compatibility_minimum = "4.4"
+reloadable = false
+
+; Editor builds match BOTH the "editor" and "debug" feature tags, and Godot
+; loads the first entry whose tags all match — so the editor rows must come
+; first or an editor session would try to load the export-template binary.
+;
+; The template_* rows exist only so playtests launched from the editor find a
+; library to load. Nothing is registered outside the editor initialisation
+; level, so in a running game this library loads and does nothing. Build them
+; with `scons target=template_debug` (see docs/SETUP.md).
+
+[libraries]
+
+linux.editor.x86_64 =    "res://addons/godot_ai_os/bin/libgodot_ai_os.linux.editor.x86_64.so"
+linux.editor.arm64 =     "res://addons/godot_ai_os/bin/libgodot_ai_os.linux.editor.arm64.so"
+linux.debug.x86_64 =     "res://addons/godot_ai_os/bin/libgodot_ai_os.linux.template_debug.x86_64.so"
+linux.debug.arm64 =      "res://addons/godot_ai_os/bin/libgodot_ai_os.linux.template_debug.arm64.so"
+linux.release.x86_64 =   "res://addons/godot_ai_os/bin/libgodot_ai_os.linux.template_release.x86_64.so"
+linux.release.arm64 =    "res://addons/godot_ai_os/bin/libgodot_ai_os.linux.template_release.arm64.so"
+
+windows.editor.x86_64 =  "res://addons/godot_ai_os/bin/libgodot_ai_os.windows.editor.x86_64.dll"
+windows.debug.x86_64 =   "res://addons/godot_ai_os/bin/libgodot_ai_os.windows.template_debug.x86_64.dll"
+windows.release.x86_64 = "res://addons/godot_ai_os/bin/libgodot_ai_os.windows.template_release.x86_64.dll"
+
+macos.editor =           "res://addons/godot_ai_os/bin/libgodot_ai_os.macos.editor.framework"
+macos.debug =            "res://addons/godot_ai_os/bin/libgodot_ai_os.macos.template_debug.framework"
+macos.release =          "res://addons/godot_ai_os/bin/libgodot_ai_os.macos.template_release.framework"

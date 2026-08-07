@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "open_scene",
+  "title": "open_scene",
+  "description": "Makes a scene the one the editor is editing. Every scene tool acts on the currently open scene, so this is how you move between them. It does not mutate the project, but it does discard nothing — unsaved changes in the previous scene stay open in their own editor tab.",
+  "mutating": false,
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path"],
+  "properties": {
+    "path": {
+      "type": "string",
+      "pattern": "^res://.+",
+      "description": "Scene file to open."
+    },
+    "inherited": {
+      "type": "boolean",
+      "default": false,
+      "description": "Open as a new inherited scene rather than the scene itself."
+    }
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "requested": { "type": "string" },
+      "current_scene": { "type": "string", "description": "What the editor is actually editing after the call." },
+      "opened": { "type": "boolean", "description": "False when the editor refused; 'note' explains." },
+      "note": { "type": "string" }
+    }
+  },
+  "errors": {
+    "missing_parameter": "'path' is required.",
+    "scene_not_found": "No file at that path."
+  }
+}

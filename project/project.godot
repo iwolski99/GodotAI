@@ -1,0 +1,33 @@
+; Engine configuration file.
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
+
+config_version=5
+
+[ai_agent_os]
+
+transport/enabled=true
+transport/mode=0
+transport/port=45857
+transport/bind_address="127.0.0.1"
+transport/require_token=true
+vcs/auto_checkpoint=true
+
+[application]
+
+config/name="Godot AI Agent OS — Demo"
+run/main_scene="res://main.tscn"
+config/features=PackedStringArray("4.4", "GL Compatibility")
+
+[debug]
+
+file_logging/enable_file_logging=true
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"

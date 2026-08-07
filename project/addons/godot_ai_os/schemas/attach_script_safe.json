@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "attach_script_safe",
+  "title": "attach_script_safe",
+  "description": "Writes a GDScript file and attaches it to a node. Before attaching, the script's `extends` line is checked against the node's actual class, and the file is compiled by the engine — if it does not parse, a newly created file is deleted again and the node is left untouched. Omit 'node' to only create the file; omit 'source' to attach a script that already exists.",
+  "mutating": true,
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "node": {
+      "type": "string",
+      "description": "Path of the node to attach to, relative to the scene root ('.' is the root). Omit to write the file without attaching it."
+    },
+    "path": {
+      "type": "string",
+      "pattern": "^res://.+\\.gd$",
+      "description": "Destination file. Defaults to res://scripts/<node_name>.gd in snake_case. Parent directories are created as needed."
+    },
+    "source": {
+      "type": "string",
+      "description": "Full GDScript source. If omitted and the file does not exist, a minimal `extends <node class>` stub is generated."
+    },
+    "base_class": {
+      "type": "string",
+      "description": "Base class for the generated stub. Defaults to the target node's class. Ignored when 'source' is given."
+    },
+    "class_name": {
+      "type": "string",
+      "description": "Optional `class_name` line for the generated stub."
+    },
+    "overwrite": {
+      "type": "boolean",
+      "default": false,
+      "description": "Allow replacing an existing file. Without this, writing over a file is an error."
+    },
+    "replace": {
+      "type": "boolean",
+      "default": false,
+      "description": "Allow swapping a script that is already attached to the node."
+    },
+    "dry_run": {
+      "type": "boolean",
+      "default": false,
+      "description": "Validate and report without writing or attaching anything."
+    }
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "script": { "type": "string" },
+      "node": { "type": "string" },
+      "created": { "type": "boolean", "description": "True when the file did not exist before this call." },
+      "attached": { "type": "boolean" },
+      "warnings": { "type": "array", "items": { "type": "string" } },
+      "checkpoint": { "type": "string" }
+    }
+  },
+  "errors": {
+    "no_open_scene": "A node was given but no scene is open.",
+    "node_not_found": "The 'node' path does not resolve in the open scene.",
+    "node_not_editable": "The node belongs to an instanced sub-scene.",
+    "invalid_path": "Script paths must be res:// and end in .gd.",
+    "file_exists": "The file exists and 'overwrite' was not set.",
+    "script_already_attached": "The node already has a script and 'replace' was not set.",
+    "incompatible_base": "The script extends a class the target node does not inherit from.",
+    "script_load_failed": "The engine could not parse the script; a file created by this call was removed again.",
+    "write_failed": "The file could not be written (permissions, read-only project).",
+    "mkdir_failed": "The parent directory could not be created."
+  }
+}

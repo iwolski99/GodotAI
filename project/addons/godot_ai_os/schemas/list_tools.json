@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "list_tools",
+  "title": "list_tools",
+  "description": "Returns the full tool manifest, each entry carrying its name, one-line summary, whether it mutates the project, and its complete input schema. The same manifest is pushed unprompted in the 'session_ready' event when an agent connects, so calling this is only necessary to refresh it.",
+  "mutating": false,
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {},
+  "returns": {
+    "type": "object",
+    "properties": {
+      "protocol": { "type": "string" },
+      "tools": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "summary": { "type": "string" },
+            "mutating": { "type": "boolean" },
+            "input_schema": { "type": "object" }
+          }
+        }
+      }
+    }
+  }
+}

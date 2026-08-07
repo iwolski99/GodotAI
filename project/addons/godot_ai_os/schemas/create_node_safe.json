@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "create_node_safe",
+  "title": "create_node_safe",
+  "description": "Adds a node to the scene currently open in the editor. Every property is checked against the target class before anything is instantiated, so a typo in a property name or a wrong value type fails with a precise error instead of a half-built node. The new node's owner is set to the scene root, which is what makes it persist when the scene is saved.",
+  "mutating": true,
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "type": {
+      "type": "string",
+      "description": "Engine class to instantiate, e.g. 'CharacterBody2D'. Required unless 'instance_scene' is given.",
+      "examples": ["Node2D", "Sprite2D", "CharacterBody2D", "Label", "Timer"]
+    },
+    "instance_scene": {
+      "type": "string",
+      "pattern": "^res://.+",
+      "description": "Instantiate this packed scene instead of a bare class. Mutually exclusive with 'type'."
+    },
+    "parent": {
+      "type": "string",
+      "default": ".",
+      "description": "Path of the parent node relative to the scene root ('.' is the root). Must not be inside an instanced sub-scene."
+    },
+    "name": {
+      "type": "string",
+      "description": "Name for the new node. Defaults to the class name. May not contain . : @ / \" %"
+    },
+    "auto_rename": {
+      "type": "boolean",
+      "default": true,
+      "description": "If the name is taken, append a number instead of failing. Set false to make collisions an error."
+    },
+    "properties": {
+      "type": "object",
+      "default": {},
+      "description": "Property values to apply before the node enters the tree. Values are coerced to the property's declared type: numbers for int/float, [x, y] or {\"x\":..,\"y\":..} for vectors, '#rrggbb' or {\"r\":..} for colors, a res:// path for resources.",
+      "examples": [{ "position": [64, 32], "modulate": "#ff8800", "texture": "res://art/player.png" }]
+    },
+    "index": {
+      "type": "integer",
+      "default": -1,
+      "description": "Position among the parent's children. -1 appends."
+    },
+    "groups": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "description": "Groups to add the node to (persistently)."
+    },
+    "unique_name_in_owner": {
+      "type": "boolean",
+      "default": false,
+      "description": "Mark the node %-accessible from scripts in this scene."
+    },
+    "dry_run": {
+      "type": "boolean",
+      "default": false,
+      "description": "Run every validation and report what would happen without touching the scene."
+    }
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "path": { "type": "string", "description": "Path of the new node relative to the scene root." },
+      "name": { "type": "string" },
+      "type": { "type": "string" },
+      "parent": { "type": "string" },
+      "index": { "type": "integer" },
+      "applied_properties": { "type": "array", "items": { "type": "string" } },
+      "warnings": { "type": "array", "items": { "type": "string" } },
+      "checkpoint": { "type": "string", "description": "Short git SHA of the checkpoint created for this edit, when checkpointing is on." }
+    }
+  },
+  "errors": {
+    "no_open_scene": "No scene is open in the editor.",
+    "parent_not_found": "The 'parent' path does not resolve in the open scene.",
+    "parent_not_editable": "The parent belongs to an instanced sub-scene.",
+    "unknown_type": "'type' is not a class in this Godot build.",
+    "not_a_node": "'type' exists but is not a Node subclass.",
+    "abstract_type": "'type' cannot be instantiated directly.",
+    "invalid_name": "The requested name contains characters Godot forbids.",
+    "name_conflict": "A sibling already uses that name and auto_rename is false.",
+    "invalid_properties": "One or more properties were unknown or of the wrong type; details.errors lists each one, with did_you_mean suggestions for typos. Nothing was created."
+  }
+}

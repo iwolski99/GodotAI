@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "ping",
+  "title": "ping",
+  "description": "Liveness and context check. Returns the current world-model revision and the git status of the project, which is the cheapest way to find out whether your cached view of the project is still valid.",
+  "mutating": false,
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {},
+  "returns": {
+    "type": "object",
+    "properties": {
+      "pong": { "type": "boolean" },
+      "revision": { "type": "integer" },
+      "server_time": { "type": "number" },
+      "vcs": {
+        "type": "object",
+        "properties": {
+          "available": { "type": "boolean" },
+          "branch": { "type": "string" },
+          "dirty": { "type": "boolean" },
+          "checkpoint_count": { "type": "integer" },
+          "repo_path": { "type": "string" }
+        }
+      }
+    }
+  }
+}

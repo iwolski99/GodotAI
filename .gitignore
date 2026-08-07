@@ -1,0 +1,33 @@
+# --- Godot ------------------------------------------------------------------
+# Import caches, editor layout, and the agent session file (which holds the
+# per-session token) all live here. Never commit it.
+.godot/
+.import/
+export_presets.cfg
+
+# --- Build output -----------------------------------------------------------
+# The compiled extension is a build artifact; users build it or download it from
+# a release. Committing binaries makes the repo unclonable within a year.
+project/addons/godot_ai_os/bin/
+*.os
+*.obj
+*.o
+*.a
+*.so
+*.dll
+*.dylib
+*.lib
+*.exp
+*.pdb
+*.ilk
+.sconsign.dblite
+compile_commands.json
+
+# --- Editors / OS -----------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc

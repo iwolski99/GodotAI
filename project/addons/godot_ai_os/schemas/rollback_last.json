@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "rollback_last",
+  "title": "rollback_last",
+  "description": "Undoes the most recent checkpoint from this editor session with `git revert`, which adds a new commit rather than discarding history — uncommitted work is committed to its own checkpoint first, so nothing is ever lost. Files change on disk; scenes already open in the editor must be reopened to show the reverted version. This is what the dock's Rollback button calls.",
+  "mutating": true,
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {},
+  "returns": {
+    "type": "object",
+    "properties": {
+      "reverted_sha": { "type": "string" },
+      "short_sha": { "type": "string" },
+      "label": { "type": "string" },
+      "remaining_checkpoints": { "type": "integer" },
+      "note": { "type": "string" }
+    }
+  },
+  "errors": {
+    "git_unavailable": "The project directory is not a git work tree.",
+    "no_checkpoints": "No checkpoint has been recorded in this editor session.",
+    "revert_failed": "The revert conflicted; the working tree was left untouched and must be resolved by hand."
+  }
+}

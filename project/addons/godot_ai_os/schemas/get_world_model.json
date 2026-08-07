@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "get_world_model",
+  "title": "get_world_model",
+  "description": "Returns a cached JSON snapshot of the project the editor currently has open: the live scene tree (node names, paths, types, attached scripts, groups, sub-scene boundaries), the editor's state (open scenes, selection, whether a playtest is running) and an inventory of res:// scenes and scripts. Call this before any edit; the 'revision' field increments whenever the project changes underneath you.",
+  "mutating": false,
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "refresh": {
+      "type": "boolean",
+      "default": false,
+      "description": "Rebuild even if the cache is still valid. Only needed if you suspect an external tool changed the project."
+    },
+    "include_properties": {
+      "type": "boolean",
+      "default": false,
+      "description": "Include each node's non-default property values. Off by default because it multiplies the response size."
+    },
+    "include_signals": {
+      "type": "boolean",
+      "default": false,
+      "description": "Include incoming and outgoing signal connections per node."
+    },
+    "include_instanced_children": {
+      "type": "boolean",
+      "default": false,
+      "description": "Descend into instanced sub-scenes. Those nodes are not editable from the parent scene, so this is for inspection only."
+    },
+    "include_filesystem": {
+      "type": "boolean",
+      "default": true,
+      "description": "Include the res:// scene and script inventory."
+    },
+    "max_depth": {
+      "type": "integer",
+      "default": -1,
+      "minimum": -1,
+      "description": "Stop descending after this many levels (-1 = unlimited). Truncated branches report 'hidden_children'."
+    },
+    "max_files": {
+      "type": "integer",
+      "default": 512,
+      "minimum": 1,
+      "description": "Cap on the number of files listed per category."
+    }
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "revision": { "type": "integer", "description": "Bumps on every project mutation. Use it to detect stale reads." },
+      "cached": { "type": "boolean", "description": "True when served from cache without a rebuild." },
+      "build_msec": { "type": "number" },
+      "project": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "main_scene": { "type": "string" },
+          "path": { "type": "string", "description": "Absolute path of the project directory." },
+          "godot_version": { "type": "string" }
+        }
+      },
+      "editor": {
+        "type": "object",
+        "properties": {
+          "open_scenes": { "type": "array", "items": { "type": "string" } },
+          "current_scene": { "type": "string" },
+          "selected_nodes": { "type": "array", "items": { "type": "string" } },
+          "is_playing": { "type": "boolean" },
+          "playing_scene": { "type": "string" }
+        }
+      },
+      "scene": {
+        "type": ["object", "null"],
+        "description": "Null when no scene is open in the editor.",
+        "properties": {
+          "path": { "type": "string" },
+          "root": { "$ref": "#/$defs/node" }
+        }
+      },
+      "filesystem": {
+        "type": "object",
+        "properties": {
+          "scenes": { "type": "array", "items": { "type": "string" } },
+          "scripts": { "type": "array", "items": { "type": "string" } },
+          "truncated": { "type": "boolean" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "node": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "path": { "type": "string", "description": "Path relative to the scene root; the root itself is '.'. This is the form every other tool expects." },
+        "type": { "type": "string", "description": "Engine class, e.g. 'Sprite2D'." },
+        "script": { "type": ["string", "null"], "description": "res:// path of the attached script, or null." },
+        "unique_name": { "type": "boolean", "description": "Present and true when the node is marked %-accessible." },
+        "instance_of": { "type": "string", "description": "Present when this node is an instance of another scene." },
+        "groups": { "type": "array", "items": { "type": "string" } },
+        "child_count": { "type": "integer" },
+        "hidden_children": { "type": "integer", "description": "Children omitted due to max_depth or sub-scene boundaries." },
+        "properties": { "type": "object", "description": "Only present with include_properties; only non-default values are listed." },
+        "connections": { "type": "array", "description": "Only present with include_signals." },
+        "children": { "type": "array", "items": { "$ref": "#/$defs/node" } }
+      }
+    }
+  }
+}

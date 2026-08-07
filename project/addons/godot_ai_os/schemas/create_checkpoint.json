@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "create_checkpoint",
+  "title": "create_checkpoint",
+  "description": "Commits the current state of the project directory as a rollback point, using the message '[ai-checkpoint] <label>'. Requires the project to be a git work tree. Mutating tools do this automatically; call it explicitly to mark a milestone you may want to return to.",
+  "mutating": true,
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "label": {
+      "type": "string",
+      "default": "manual checkpoint",
+      "description": "Short description of what this checkpoint captures."
+    }
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "created": { "type": "boolean", "description": "False when the work tree was already clean." },
+      "sha": { "type": "string" },
+      "short_sha": { "type": "string" },
+      "label": { "type": "string" },
+      "reason": { "type": "string" }
+    }
+  },
+  "errors": {
+    "git_unavailable": "The project directory is not a git work tree, or git is not on PATH.",
+    "checkpoints_disabled": "Turned off via ai_agent_os/vcs/auto_checkpoint.",
+    "git_add_failed": "git add failed; output is in the message.",
+    "git_commit_failed": "git commit failed; output is in the message."
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "save_scene",
+  "title": "save_scene",
+  "description": "Writes the open scene to disk. Scene edits made by create_node_safe / attach_script_safe / safe_delete_node live in the editor's memory until this is called, so nothing is captured by a git checkpoint (and nothing survives a crash) until you save.",
+  "mutating": true,
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "path": {
+      "type": "string",
+      "pattern": "^res://.+",
+      "description": "Save under a new path (Save As). Required the first time a scene is saved. Directories are created as needed."
+    }
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "path": { "type": "string" },
+      "checkpoint": { "type": "string" }
+    }
+  },
+  "errors": {
+    "no_open_scene": "No scene is open in the editor.",
+    "scene_never_saved": "The scene has no path yet; pass an explicit 'path'.",
+    "invalid_path": "Scene paths must start with res://.",
+    "save_failed": "The editor refused to save."
+  }
+}

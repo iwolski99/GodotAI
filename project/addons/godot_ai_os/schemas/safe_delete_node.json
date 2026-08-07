@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "safe_delete_node",
+  "title": "safe_delete_node",
+  "description": "Deletes a node after auditing what depends on it. The audit reports two classes of finding: 'blockers', which stop the deletion unless force is set (deleting the scene root, or other nodes holding NodePath properties that point into the subtree), and 'warnings', which are reported but do not stop it (descendants that go with it, attached scripts, signal connections, group membership, and textual references to the node in project scripts). Run with dry_run first when you are unsure.",
+  "mutating": true,
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["node"],
+  "properties": {
+    "node": {
+      "type": "string",
+      "description": "Path of the node to delete, relative to the scene root."
+    },
+    "dry_run": {
+      "type": "boolean",
+      "default": false,
+      "description": "Produce the full audit report without deleting anything."
+    },
+    "force": {
+      "type": "boolean",
+      "default": false,
+      "description": "Delete even when blockers were found. Use only after reading them."
+    },
+    "check_scripts": {
+      "type": "boolean",
+      "default": true,
+      "description": "Grep project .gd files for $Name / %Name / \"Name\" references to this node. Costs a filesystem scan; turn it off in tight loops."
+    }
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "node": { "type": "string" },
+      "type": { "type": "string" },
+      "descendants": { "type": "integer" },
+      "safe": { "type": "boolean", "description": "True when no blockers were found." },
+      "deleted": { "type": "boolean" },
+      "forced": { "type": "boolean", "description": "True when the deletion went ahead despite blockers." },
+      "blockers": { "$ref": "#/$defs/findings" },
+      "warnings": { "$ref": "#/$defs/findings" },
+      "checkpoint": { "type": "string" }
+    }
+  },
+  "errors": {
+    "no_open_scene": "No scene is open in the editor.",
+    "node_not_found": "The 'node' path does not resolve in the open scene.",
+    "unsafe_delete": "Blockers were found and force was not set. error.details carries the full report.",
+    "no_parent": "The node is not attached to a parent."
+  },
+  "$defs": {
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "is_scene_root",
+              "not_editable",
+              "referenced_by_nodepath",
+              "has_children",
+              "scripts_detached",
+              "signal_connections",
+              "referenced_in_script",
+              "in_groups"
+            ]
+          },
+          "message": { "type": "string" },
+          "data": { "description": "Code-specific payload: the affected paths, connections, or file/line hits." }
+        }
+      }
+    }
+  }
+}

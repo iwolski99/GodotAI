@@ -1,0 +1,10 @@
+[gd_scene format=3 uid="uid://b8aiosdemo001"]
+
+[node name="Main" type="Node2D"]
+
+[node name="Title" type="Label" parent="."]
+offset_left = 40.0
+offset_top = 40.0
+offset_right = 640.0
+offset_bottom = 96.0
+text = "AI Agent OS demo scene — ask the agent to build something here."
