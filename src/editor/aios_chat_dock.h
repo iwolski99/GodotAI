@@ -15,6 +15,7 @@
 #include <godot_cpp/classes/option_button.hpp>
 #include <godot_cpp/classes/panel_container.hpp>
 #include <godot_cpp/classes/rich_text_label.hpp>
+#include <godot_cpp/classes/scroll_container.hpp>
 #include <godot_cpp/classes/spin_box.hpp>
 #include <godot_cpp/classes/text_edit.hpp>
 #include <godot_cpp/classes/v_box_container.hpp>
@@ -75,10 +76,12 @@ private:
 	CheckBox *show_thinking_toggle = nullptr;
 	OptionButton *effort_selector = nullptr;
 	SpinBox *max_tokens_field = nullptr;
+	SpinBox *max_turns_field = nullptr;
 
 	State state = STATE_IDLE;
 	String session_token;
 	int message_count = 0;
+	String history_storage;
 
 	// Set while set_settings() is writing widget values, so the change signals
 	// those writes fire do not bounce a "user changed a setting" event back at
@@ -130,6 +133,9 @@ public:
 	void append_tool_result(const String &p_tool, bool p_ok, const Dictionary &p_envelope);
 	void append_diff_preview(const String &p_diff);
 	void clear_history();
+	void restore_history_text(const String &p_bbcode, int p_message_count = 0);
+	String export_history_text() const { return history_storage; }
+	int get_message_count() const { return message_count; }
 
 	// --- state -------------------------------------------------------------
 	void set_state_name(const String &p_state, const String &p_detail);
@@ -151,6 +157,7 @@ public:
 	void set_key_status(const String &p_provider, bool p_has_key, const String &p_redacted, bool p_from_env);
 
 	String get_selected_mode() const;
+	void set_selected_mode(const String &p_mode);
 
 	// Switches the Execute button / input placeholder for the clarification interview.
 	void set_clarifying_ui(bool p_clarifying);

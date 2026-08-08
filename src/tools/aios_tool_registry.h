@@ -65,6 +65,9 @@ public:
 	// invalidate the world model.
 	static bool is_mutating(const String &p_tool);
 
+	// True for tools that edit the open scene tree or its scripts.
+	static bool is_scene_edit(const String &p_tool);
+
 	// Tools allowed while the built-in agent is still interviewing the human
 	// about what to build. Mutating scene/script tools are withheld until
 	// commit_brief succeeds.

@@ -106,8 +106,9 @@ private:
 	Dictionary pending_plan;
 	String propose_plan_tool_use_id;
 
-	// Tracks whether the current tool batch changed the project (for auto_playtest).
-	bool batch_had_mutations = false;
+	// Tracks whether the current tool batch saved the scene (for auto_playtest).
+	bool batch_saved_scene = false;
+	bool batch_had_scene_edits = false;
 
 	Ref<AIOSAgentMemory> memory;
 
@@ -123,7 +124,10 @@ private:
 	String _memory_block() const;
 	void _enter_build_phase(const Dictionary &p_brief, bool p_skipped_interview);
 	static String _format_brief(const Dictionary &p_brief);
+	static String _format_plan(const Dictionary &p_plan);
 	static Dictionary _minimal_brief_from_goal(const String &p_goal);
+	String _build_session_message(const String &p_text, const String &p_previous_mode, bool p_mode_changed) const;
+	void _prepare_run_state(const String &p_goal, const String &p_mode, bool p_fresh_session);
 
 	// The prompt wrapper: turns machine findings into text a model can act on.
 	static String build_validation_feedback(const String &p_tool, const Array &p_findings);
@@ -152,6 +156,21 @@ public:
 
 	// Kicks off a run. Returns an error envelope if preconditions fail.
 	Dictionary start(const String &p_goal, const String &p_mode);
+
+	// Continues the same editor session after a mode switch or follow-up prompt.
+	// Preserves LLM history and any committed brief / pending plan.
+	Dictionary continue_session(const String &p_text, const String &p_mode);
+
+	// Clears session state so the next prompt starts a brand-new run.
+	void reset_session();
+
+	Dictionary export_session_state() const;
+	void import_session_state(const Dictionary &p_state);
+	void sync_session_tools();
+	void refresh_session_prompt();
+
+	// True when a prior prompt or handoff artifact should be preserved.
+	bool has_session_context() const;
 
 	// Continues a clarifying interview with the human's answer from the dock.
 	Dictionary continue_with_user_answer(const String &p_answer);

@@ -8,6 +8,7 @@
 #include "../validate/aios_validator.h"
 
 #include <godot_cpp/classes/json.hpp>
+#include <godot_cpp/classes/time.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
@@ -17,6 +18,9 @@ void AIOSPipeline::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("_on_playtest_finished", "report"), &AIOSPipeline::_on_playtest_finished);
 
 	ClassDB::bind_method(D_METHOD("start", "goal", "mode"), &AIOSPipeline::start);
+	ClassDB::bind_method(D_METHOD("continue_session", "text", "mode"), &AIOSPipeline::continue_session);
+	ClassDB::bind_method(D_METHOD("reset_session"), &AIOSPipeline::reset_session);
+	ClassDB::bind_method(D_METHOD("has_session_context"), &AIOSPipeline::has_session_context);
 	ClassDB::bind_method(D_METHOD("continue_with_user_answer", "answer"), &AIOSPipeline::continue_with_user_answer);
 	ClassDB::bind_method(D_METHOD("skip_clarification_and_build"), &AIOSPipeline::skip_clarification_and_build);
 	ClassDB::bind_method(D_METHOD("stop"), &AIOSPipeline::stop);
@@ -284,6 +288,18 @@ String AIOSPipeline::_format_brief(const Dictionary &p_brief) {
 	return out;
 }
 
+String AIOSPipeline::_format_plan(const Dictionary &p_plan) {
+	String out = String(p_plan.get("summary", ""));
+	Array steps = p_plan.get("steps", Array());
+	if (steps.size() > 0) {
+		out += "\n\nSteps:\n";
+		for (int i = 0; i < steps.size(); i++) {
+			out += String::num_int64(i + 1) + ". " + String(steps[i]) + "\n";
+		}
+	}
+	return out;
+}
+
 Dictionary AIOSPipeline::_minimal_brief_from_goal(const String &p_goal) {
 	Dictionary brief;
 	brief["title"] = "Untitled prototype";
@@ -343,6 +359,187 @@ void AIOSPipeline::_enter_build_phase(const Dictionary &p_brief, bool p_skipped_
 					? "Interview skipped. Building from a minimal brief derived from your goal."
 					: "Brief locked. Build tools unlocked — implementing now.");
 	emit_signal("agent_message", String("**Game brief**\n\n") + _format_brief(committed_brief));
+}
+
+String AIOSPipeline::_build_session_message(const String &p_text, const String &p_previous_mode,
+		bool p_mode_changed) const {
+	String message;
+
+	if (p_mode_changed) {
+		message += "[System: Role switched from " + p_previous_mode + " to " + mode + ". ";
+		message += "Continue the same task using the conversation above. ";
+		if (mode.to_lower() == "coder") {
+			message +=
+					"You now have full mutating build tools. Implement the committed brief and any approved "
+					"plan — do not restart the interview or re-propose from scratch unless something is "
+					"genuinely missing.";
+		} else if (mode.to_lower() == "architect") {
+			message += "Focus on planning and inspection; mutating tools are not available in this role.";
+		}
+		message += "]\n\n";
+	}
+
+	if (!committed_brief.is_empty()) {
+		message += "## Committed brief (still in effect)\n\n" + _format_brief(committed_brief) + "\n";
+	}
+	if (!pending_plan.is_empty()) {
+		message += "## Plan from the prior role\n\n" + _format_plan(pending_plan) + "\n";
+	}
+
+	message += p_text;
+	return message;
+}
+
+void AIOSPipeline::_prepare_run_state(const String &p_goal, const String &p_mode, bool p_fresh_session) {
+	goal = p_goal;
+	mode = p_mode;
+	repair_attempts = 0;
+	steps_executed = 0;
+	pending_results.clear();
+	deferred_calls.clear();
+	awaiting_playtest = false;
+	awaiting_user = false;
+	ask_user_tool_use_id = String();
+	pending_questions.clear();
+	propose_plan_tool_use_id = String();
+	batch_saved_scene = false;
+	batch_had_scene_edits = false;
+
+	if (p_fresh_session) {
+		committed_brief.clear();
+		brief_ready = false;
+		clarifying = _mode_requires_brief(mode);
+		awaiting_plan_approval = false;
+		plan_approved = false;
+		pending_plan.clear();
+	} else {
+		const bool has_prior_conversation = llm != nullptr && llm->get_history().size() > 0;
+		if (!committed_brief.is_empty()) {
+			brief_ready = true;
+			clarifying = false;
+		} else if (has_prior_conversation) {
+			// The prior role already interviewed or planned in chat — do not restart.
+			clarifying = false;
+		} else {
+			clarifying = _mode_requires_brief(mode) && !brief_ready;
+		}
+
+		// A handoff into coder mode means the human wants implementation now.
+		if (mode.to_lower() == "coder") {
+			awaiting_plan_approval = false;
+			plan_approved = true;
+		} else if (!pending_plan.is_empty()) {
+			awaiting_plan_approval = false;
+			plan_approved = true;
+		}
+	}
+
+	if (registry.is_valid()) {
+		registry->set_active_role(mode);
+	}
+	if (memory.is_valid()) {
+		memory->load();
+	}
+}
+
+bool AIOSPipeline::has_session_context() const {
+	if (llm != nullptr && llm->get_history().size() > 0) {
+		return true;
+	}
+	if (!committed_brief.is_empty()) {
+		return true;
+	}
+	if (!pending_plan.is_empty()) {
+		return true;
+	}
+	if (!goal.is_empty() && brief_ready) {
+		return true;
+	}
+	return false;
+}
+
+void AIOSPipeline::reset_session() {
+	if (is_running()) {
+		stop();
+	}
+
+	goal = String();
+	mode = "architect";
+	committed_brief.clear();
+	brief_ready = false;
+	clarifying = false;
+	pending_plan.clear();
+	awaiting_plan_approval = false;
+	plan_approved = false;
+	propose_plan_tool_use_id = String();
+	pending_results.clear();
+	deferred_calls.clear();
+	awaiting_playtest = false;
+	awaiting_user = false;
+	ask_user_tool_use_id = String();
+	pending_questions.clear();
+	batch_saved_scene = false;
+	batch_had_scene_edits = false;
+	stage = STAGE_IDLE;
+
+	if (llm != nullptr) {
+		llm->cancel();
+		llm->reset_conversation();
+	}
+	if (registry.is_valid()) {
+		registry->set_active_role(String());
+	}
+}
+
+Dictionary AIOSPipeline::export_session_state() const {
+	Dictionary d;
+	d["goal"] = goal;
+	d["mode"] = mode;
+	d["brief_ready"] = brief_ready;
+	d["committed_brief"] = committed_brief;
+	d["pending_plan"] = pending_plan;
+	d["awaiting_plan_approval"] = awaiting_plan_approval;
+	d["plan_approved"] = plan_approved;
+	d["clarifying"] = clarifying;
+	return d;
+}
+
+void AIOSPipeline::import_session_state(const Dictionary &p_state) {
+	if (p_state.is_empty()) {
+		return;
+	}
+
+	goal = String(p_state.get("goal", ""));
+	mode = String(p_state.get("mode", "architect"));
+	brief_ready = (bool)p_state.get("brief_ready", false);
+	committed_brief = p_state.get("committed_brief", Dictionary());
+	pending_plan = p_state.get("pending_plan", Dictionary());
+	awaiting_plan_approval = (bool)p_state.get("awaiting_plan_approval", false);
+	plan_approved = (bool)p_state.get("plan_approved", false);
+	clarifying = (bool)p_state.get("clarifying", false);
+
+	if (!committed_brief.is_empty()) {
+		brief_ready = true;
+		clarifying = false;
+	}
+
+	if (registry.is_valid()) {
+		registry->set_active_role(mode);
+	}
+}
+
+void AIOSPipeline::sync_session_tools() {
+	if (llm != nullptr && llm->is_configured()) {
+		_apply_tools_for_phase();
+	}
+}
+
+void AIOSPipeline::refresh_session_prompt() {
+	if (llm == nullptr || !llm->is_configured() || !llm->get_system_prompt().is_empty()) {
+		return;
+	}
+	const bool git_ok = git.is_valid() && git->is_available();
+	llm->set_system_prompt(build_system_prompt(mode, git_ok, clarifying, _memory_block()));
 }
 
 /* -------------------------------------------------------------------------- */
@@ -409,6 +606,10 @@ String AIOSPipeline::build_system_prompt(const String &p_mode, bool p_git_availa
 			"tool.\n\n"
 			"Use dry_run when you are unsure. It runs every check and reports what would happen, at no cost to "
 			"the project.\n\n"
+			"capture_viewport_screenshot sends the editor viewport as an image. That only works with "
+			"vision-capable models (Anthropic Claude, OpenRouter models that accept images such as GPT-4o). "
+			"If the model cannot see images, you still receive the saved PNG path — open it locally or use "
+			"get_world_model, validate_scene, and run_playtest instead.\n\n"
 			"Finish the whole task, not the easy part of it. Only report completion when it is actually done. "
 			"If something is genuinely blocked, do the rest and say plainly what is missing and why.\n\n"
 			"Tell the human what you are doing as you go, in plain sentences. They are watching a dock, not "
@@ -464,32 +665,11 @@ Dictionary AIOSPipeline::start(const String &p_goal, const String &p_mode) {
 		return AIOSJson::error("no_model",
 				"No model is configured. Open the AI Agent dock's Settings panel and add an API key.");
 	}
-
-	goal = p_goal;
-	mode = p_mode;
-	repair_attempts = 0;
-	steps_executed = 0;
-	pending_results.clear();
-	deferred_calls.clear();
-	awaiting_playtest = false;
-	awaiting_user = false;
-	ask_user_tool_use_id = String();
-	pending_questions.clear();
-	committed_brief.clear();
-	brief_ready = false;
-	clarifying = _mode_requires_brief(mode);
-	awaiting_plan_approval = false;
-	plan_approved = false;
-	pending_plan.clear();
-	propose_plan_tool_use_id = String();
-	batch_had_mutations = false;
-
-	if (registry.is_valid()) {
-		registry->set_active_role(mode);
+	if (has_session_context()) {
+		return continue_session(p_goal, p_mode);
 	}
-	if (memory.is_valid()) {
-		memory->load();
-	}
+
+	_prepare_run_state(p_goal, p_mode, true);
 
 	const bool git_ok = git.is_valid() && git->is_available();
 	if (!git_ok) {
@@ -532,6 +712,67 @@ Dictionary AIOSPipeline::start(const String &p_goal, const String &p_mode) {
 	result["model"] = llm->describe_target();
 	result["git"] = git_ok;
 	result["clarifying"] = clarifying;
+	result["continued"] = false;
+	return AIOSJson::ok(result);
+}
+
+Dictionary AIOSPipeline::continue_session(const String &p_text, const String &p_mode) {
+	if (stage != STAGE_IDLE && stage != STAGE_ERROR) {
+		return AIOSJson::error("already_running",
+				"A run is already in progress (" + get_stage_name() + "). Stop it before continuing.");
+	}
+	if (llm == nullptr || !llm->is_configured()) {
+		return AIOSJson::error("no_model",
+				"No model is configured. Open the AI Agent dock's Settings panel and add an API key.");
+	}
+	if (llm->is_busy()) {
+		return AIOSJson::error("busy", "A model request is already in flight.");
+	}
+	if (!has_session_context()) {
+		return start(p_text, p_mode);
+	}
+
+	const String previous_mode = mode;
+	const bool mode_changed = previous_mode.to_lower() != p_mode.to_lower();
+	const String session_goal = goal.is_empty() ? p_text : goal;
+
+	_prepare_run_state(session_goal, p_mode, false);
+
+	const bool git_ok = git.is_valid() && git->is_available();
+	if (git_ok) {
+		Dictionary snap = git->create_snapshot("session continue: " + p_text.substr(0, 60));
+		if ((bool)snap["ok"]) {
+			last_good_snapshot = String(Dictionary(snap["result"])["sha"]);
+		}
+	}
+
+	llm->set_system_prompt(build_system_prompt(mode, git_ok, clarifying, _memory_block()));
+	_apply_tools_for_phase();
+
+	const String message = _build_session_message(p_text, previous_mode, mode_changed);
+
+	if (clarifying) {
+		_set_stage(STAGE_CLARIFYING, "continuing clarification in " + mode);
+	} else {
+		_set_stage(STAGE_PLANNING, "continuing in " + mode + " — " + llm->describe_target());
+	}
+
+	if (mode_changed) {
+		emit_signal("pipeline_log", "info",
+				"Continuing the session in " + mode + " mode with prior chat history preserved.");
+	}
+
+	llm->send_user_message(message);
+
+	Dictionary result;
+	result["goal"] = goal;
+	result["mode"] = mode;
+	result["previous_mode"] = previous_mode;
+	result["model"] = llm->describe_target();
+	result["git"] = git_ok;
+	result["clarifying"] = clarifying;
+	result["continued"] = true;
+	result["mode_changed"] = mode_changed;
 	return AIOSJson::ok(result);
 }
 
@@ -687,12 +928,19 @@ void AIOSPipeline::stop() {
 	pending_questions.clear();
 	pending_results.clear();
 	deferred_calls.clear();
-	clarifying = false;
-	brief_ready = false;
-	awaiting_plan_approval = false;
-	plan_approved = false;
-	pending_plan.clear();
 	propose_plan_tool_use_id = String();
+	awaiting_plan_approval = false;
+
+	// Preserve brief/plan artifacts so a mode switch or follow-up prompt can
+	// continue the same session without re-interviewing.
+	if (committed_brief.is_empty()) {
+		brief_ready = false;
+		clarifying = false;
+	} else {
+		brief_ready = true;
+		clarifying = false;
+	}
+
 	if (registry.is_valid()) {
 		registry->set_active_role(String());
 	}
@@ -815,15 +1063,30 @@ void AIOSPipeline::_on_model_failed(const Dictionary &p_error) {
 void AIOSPipeline::_handle_tool_calls(const Array &p_calls) {
 	pending_results.clear();
 	deferred_calls.clear();
-	batch_had_mutations = false;
+	batch_saved_scene = false;
+	batch_had_scene_edits = false;
+
+	Array calls = p_calls;
+	Dictionary used_ids;
+	for (int i = 0; i < calls.size(); i++) {
+		Dictionary call = calls[i];
+		String id = String(call.get("id", "")).strip_edges();
+		if (id.is_empty() || used_ids.has(id)) {
+			id = "call_" + String::num_int64(i) + "_" +
+					String::num_uint64((uint64_t)Time::get_singleton()->get_ticks_usec() & 0xfffff);
+		}
+		used_ids[id] = true;
+		call["id"] = id;
+		calls[i] = call;
+	}
 
 	// One snapshot per batch, not per call. A model routinely emits several
 	// calls that only make sense together (create a node, then attach its
 	// script); rolling back to the middle of that would leave a half-built
 	// scene that is worse than either end state.
 	bool may_mutate = false;
-	for (int i = 0; i < p_calls.size(); i++) {
-		Dictionary call = p_calls[i];
+	for (int i = 0; i < calls.size(); i++) {
+		Dictionary call = calls[i];
 		if (AIOSToolRegistry::is_mutating(String(call.get("name", "")))) {
 			may_mutate = true;
 			break;
@@ -841,8 +1104,8 @@ void AIOSPipeline::_handle_tool_calls(const Array &p_calls) {
 		}
 	}
 
-	for (int i = 0; i < p_calls.size(); i++) {
-		Dictionary call = p_calls[i];
+	for (int i = 0; i < calls.size(); i++) {
+		Dictionary call = calls[i];
 		const String tool = String(call.get("name", ""));
 
 		if (require_plan_approval && !plan_approved && AIOSToolRegistry::is_mutating(tool) && tool != "save_scene") {
@@ -858,7 +1121,7 @@ void AIOSPipeline::_handle_tool_calls(const Array &p_calls) {
 			continue;
 		}
 
-		if (awaiting_playtest || awaiting_user || awaiting_plan_approval) {
+		if (awaiting_playtest || awaiting_user) {
 			// Everything after a playtest or an ask_user call waits for the
 			// human/runtime to finish — continuing would change the world under
 			// an answer that has not arrived yet.
@@ -868,7 +1131,7 @@ void AIOSPipeline::_handle_tool_calls(const Array &p_calls) {
 		_execute_call(call);
 	}
 
-	if (!awaiting_playtest && !awaiting_user && !awaiting_plan_approval) {
+	if (!awaiting_playtest && !awaiting_user) {
 		_finish_turn();
 	}
 }
@@ -1067,8 +1330,11 @@ void AIOSPipeline::_execute_call(const Dictionary &p_call) {
 
 	if (ok) {
 		steps_executed++;
-		if (AIOSToolRegistry::is_mutating(tool)) {
-			batch_had_mutations = true;
+		if (tool == "save_scene") {
+			batch_saved_scene = true;
+		}
+		if (AIOSToolRegistry::is_scene_edit(tool)) {
+			batch_had_scene_edits = true;
 		}
 		_push_result(id, envelope["result"], false);
 	} else {
@@ -1079,13 +1345,28 @@ void AIOSPipeline::_execute_call(const Dictionary &p_call) {
 void AIOSPipeline::_push_result(const String &p_id, const Dictionary &p_payload, bool p_is_error) {
 	Dictionary block;
 	block["type"] = "tool_result";
-	block["tool_use_id"] = p_id;
+	block["tool_use_id"] = p_id.strip_edges();
+
+	const Dictionary payload = p_payload.duplicate();
 
 	// A screenshot has to reach the model as an actual image block, not as a
 	// base64 string buried in JSON — a model handed 400 KB of base64 text will
 	// dutifully try to read it as text and learn nothing.
-	if (!p_is_error && p_payload.has("image_base64")) {
-		Dictionary described = p_payload.duplicate();
+	if (!p_is_error && payload.has("image_base64")) {
+		if (llm != nullptr && !llm->get_vision_supported()) {
+			Dictionary described = payload.duplicate();
+			described.erase("image_base64");
+			described["vision_unavailable"] = true;
+			described["message"] =
+					"Screenshot saved to disk, but the configured model cannot accept images. Open the PNG "
+					"path locally, switch to a vision-capable model in Settings, or rely on get_world_model / "
+					"validate_scene / run_playtest instead.";
+			block["content"] = JSON::stringify(described);
+			pending_results.push_back(block);
+			return;
+		}
+
+		Dictionary described = payload.duplicate();
 		const String base64 = described["image_base64"];
 		const String media_type = String(described.get("media_type", "image/png"));
 		// Strip the payload out of the JSON summary so it is not sent twice.
@@ -1103,7 +1384,7 @@ void AIOSPipeline::_push_result(const String &p_id, const Dictionary &p_payload,
 		return;
 	}
 
-	block["content"] = JSON::stringify(p_payload);
+	block["content"] = JSON::stringify(payload);
 	if (p_is_error) {
 		block["is_error"] = true;
 	}
@@ -1198,18 +1479,19 @@ void AIOSPipeline::_finish_turn() {
 	// --- success -----------------------------------------------------------
 	repair_attempts = 0;
 
-	// Auto-playtest after a mutating batch so the Observe stage is not skipped
-	// when the model forgets to call run_playtest.
-	if (auto_playtest && batch_had_mutations && playtest.is_valid() && !awaiting_playtest) {
-		_set_stage(STAGE_PLAYTESTING, "auto smoke test after edits");
+	// Auto-playtest only after the agent saved scene edits to disk. Running the
+	// main scene before that tests stale files and spams the dock during planning.
+	if (auto_playtest && batch_saved_scene && batch_had_scene_edits && playtest.is_valid() && !awaiting_playtest) {
+		_set_stage(STAGE_PLAYTESTING, "auto smoke test after scene save");
 		Dictionary play_params;
 		play_params["timeout_sec"] = 20;
 		Dictionary launched = playtest->start(play_params);
 		if ((bool)launched["ok"]) {
 			awaiting_playtest = true;
 			playtest_tool_use_id = "__auto_playtest__";
-			batch_had_mutations = false;
-			emit_signal("pipeline_log", "info", "Running automatic playtest after mutating edits.");
+			batch_saved_scene = false;
+			batch_had_scene_edits = false;
+			emit_signal("pipeline_log", "info", "Running automatic playtest after the scene was saved.");
 			return;
 		}
 		emit_signal("pipeline_log", "warn",

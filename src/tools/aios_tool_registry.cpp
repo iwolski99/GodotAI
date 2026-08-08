@@ -48,7 +48,7 @@ static const ToolInfo TOOL_TABLE[] = {
 	{ "validate_change", "Dry-run a planned tool call through the static checker without executing it.", false },
 	{ "validate_scene", "Sweep the open scene for dangling NodePaths, missing resources and broken scripts.", false },
 	{ "run_playtest", "Launch the game in a child process and return its runtime errors and stack traces.", false },
-	{ "capture_viewport_screenshot", "Take a picture of the editor viewport and look at it. Catches what no error message reports: bad lighting, misplaced geometry, broken layout.", false },
+	{ "capture_viewport_screenshot", "Capture the editor viewport as a PNG. Requires a vision-capable model to see the image; otherwise you get the saved file path only.", false },
 	{ "generate_3d_asset", "Generate a 3D model from a text prompt via Meshy or Tripo3D, download it, and import it. Costs money per call.", true },
 	{ "import_asset_from_url", "Download any asset URL into the project and import it. Works with providers this plugin does not know about.", true },
 	{ "cleanup_mesh", "Run a mesh through headless Blender: reduce triangles, normalise scale, and tag collision geometry.", true },
@@ -102,6 +102,13 @@ bool AIOSToolRegistry::is_mutating(const String &p_tool) {
 		}
 	}
 	return false;
+}
+
+bool AIOSToolRegistry::is_scene_edit(const String &p_tool) {
+	return p_tool == "create_node_safe" || p_tool == "attach_script_safe" || p_tool == "safe_delete_node" ||
+			p_tool == "set_node_properties" || p_tool == "reparent_node" || p_tool == "connect_signal_safe" ||
+			p_tool == "disconnect_signal_safe" || p_tool == "create_scene" || p_tool == "patch_script" ||
+			p_tool == "save_scene";
 }
 
 bool AIOSToolRegistry::is_clarify_phase_tool(const String &p_tool) {
@@ -404,7 +411,7 @@ Dictionary AIOSToolRegistry::call_tool(const String &p_tool, const Dictionary &p
 			p_tool != "create_checkpoint" && p_tool != "rollback_last") {
 		Dictionary checkpoint = git->create_checkpoint(p_tool);
 		if ((bool)checkpoint["ok"]) {
-			Dictionary result = envelope["result"];
+			Dictionary result = Dictionary(envelope["result"]).duplicate();
 			Dictionary cp = checkpoint["result"];
 			if ((bool)AIOSJson::get_bool(cp, "created", false)) {
 				result["checkpoint"] = cp["short_sha"];
@@ -413,7 +420,8 @@ Dictionary AIOSToolRegistry::call_tool(const String &p_tool, const Dictionary &p
 		}
 	}
 
-	Dictionary result_or_error = envelope.has("result") ? Dictionary(envelope["result"]) : Dictionary();
+	Dictionary result_or_error =
+			envelope.has("result") ? Dictionary(envelope["result"]).duplicate() : Dictionary();
 	result_or_error["elapsed_msec"] = (double)(Time::get_singleton()->get_ticks_usec() - started) / 1000.0;
 	if (envelope.has("result")) {
 		envelope["result"] = result_or_error;

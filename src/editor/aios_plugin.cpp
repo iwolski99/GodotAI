@@ -4,6 +4,7 @@
 
 #include "aios_plugin.h"
 
+#include "../aios_build_info.h"
 #include "../util/aios_json.h"
 
 #include <godot_cpp/classes/dir_access.hpp>
@@ -61,6 +62,8 @@ void AIOSPlugin::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("_on_execute_plan_requested", "mode"), &AIOSPlugin::_on_execute_plan_requested);
 	ClassDB::bind_method(D_METHOD("_on_stop_requested"), &AIOSPlugin::_on_stop_requested);
 	ClassDB::bind_method(D_METHOD("_on_rollback_requested"), &AIOSPlugin::_on_rollback_requested);
+	ClassDB::bind_method(D_METHOD("_on_history_cleared"), &AIOSPlugin::_on_history_cleared);
+	ClassDB::bind_method(D_METHOD("_on_history_changed"), &AIOSPlugin::_on_history_changed);
 	ClassDB::bind_method(D_METHOD("_on_scene_changed", "root"), &AIOSPlugin::_on_scene_changed);
 	ClassDB::bind_method(D_METHOD("_on_scene_saved", "path"), &AIOSPlugin::_on_scene_saved);
 
@@ -137,7 +140,7 @@ void AIOSPlugin::_register_project_settings() {
 	_setting(SETTING_EFFORT, 2, Variant::INT, "low,medium,high,xhigh,max");
 	_setting(SETTING_MAX_TOKENS, 16384, Variant::INT);
 
-	_setting(SETTING_MAX_TURNS, 24, Variant::INT);
+	_setting(SETTING_MAX_TURNS, 48, Variant::INT);
 	_setting(SETTING_MAX_REPAIRS, 3, Variant::INT);
 	_setting(SETTING_AUTO_PLAYTEST, true, Variant::BOOL);
 	_setting(SETTING_AUTO_ROLLBACK, true, Variant::BOOL);
@@ -171,6 +174,7 @@ Dictionary AIOSPlugin::_read_model_settings() const {
 	settings["show_thinking"] = (bool)ps->get_setting(SETTING_SHOW_THINKING, true);
 	settings["effort"] = AIOS_EFFORT_NAMES[effort_index];
 	settings["max_tokens"] = (int)(int64_t)ps->get_setting(SETTING_MAX_TOKENS, 16384);
+	settings["max_turns"] = (int)(int64_t)ps->get_setting(SETTING_MAX_TURNS, 48);
 	return settings;
 }
 
@@ -195,6 +199,7 @@ void AIOSPlugin::_write_model_settings(const Dictionary &p_settings) {
 		}
 	}
 	ps->set_setting(SETTING_MAX_TOKENS, (int)(int64_t)p_settings.get("max_tokens", 16384));
+	ps->set_setting(SETTING_MAX_TURNS, (int)(int64_t)p_settings.get("max_turns", 48));
 
 	// Persist immediately. Losing an API-key-adjacent configuration because the
 	// editor was closed the wrong way is a bad first impression.
@@ -207,7 +212,7 @@ void AIOSPlugin::_apply_model_settings() {
 
 	if (llm != nullptr) {
 		llm->set_config(settings);
-		llm->set_max_turns((int)(int64_t)ps->get_setting(SETTING_MAX_TURNS, 24));
+		llm->set_max_turns((int)(int64_t)ps->get_setting(SETTING_MAX_TURNS, 48));
 	}
 	if (pipeline.is_valid()) {
 		pipeline->set_max_repair_attempts((int)(int64_t)ps->get_setting(SETTING_MAX_REPAIRS, 3));
@@ -346,6 +351,8 @@ void AIOSPlugin::_enter_tree() {
 	dock->connect("execute_plan_requested", Callable(this, "_on_execute_plan_requested"));
 	dock->connect("stop_requested", Callable(this, "_on_stop_requested"));
 	dock->connect("rollback_requested", Callable(this, "_on_rollback_requested"));
+	dock->connect("history_cleared", Callable(this, "_on_history_cleared"));
+	dock->connect("history_changed", Callable(this, "_on_history_changed"));
 	dock->connect("settings_changed", Callable(this, "_on_settings_changed"));
 	dock->connect("api_key_submitted", Callable(this, "_on_api_key_submitted"));
 	dock->connect("api_key_cleared", Callable(this, "_on_api_key_cleared"));
@@ -382,6 +389,9 @@ void AIOSPlugin::_enter_tree() {
 
 	_start_transport();
 	_apply_model_settings();
+	_restore_chat_session();
+
+	dock->append_log("info", "AI Agent OS extension build " AIOS_BUILD_LABEL " loaded.");
 
 	if (llm->is_configured()) {
 		dock->append_log("info",
@@ -396,6 +406,8 @@ void AIOSPlugin::_enter_tree() {
 
 void AIOSPlugin::_exit_tree() {
 	set_process(false);
+
+	_save_chat_session();
 
 	// Stop the run before tearing anything down: the pipeline holds references
 	// to the registry and the playtest, and a playtest left running would
@@ -465,6 +477,14 @@ void AIOSPlugin::_process(double p_delta) {
 			last_reported_clients = clients;
 			dock->set_transport_info(ipc->is_running(), ipc->get_bind_address(), ipc->get_port(),
 					ipc->get_mode() == AIOSIpcServer::MODE_WEBSOCKET ? "websocket" : "tcp-jsonl", clients);
+		}
+	}
+
+	if (session_dirty) {
+		session_save_accumulator += p_delta;
+		if (session_save_accumulator >= 3.0) {
+			session_save_accumulator = 0.0;
+			_save_chat_session();
 		}
 	}
 }
@@ -608,7 +628,12 @@ void AIOSPlugin::_on_prompt_submitted(const String &p_text, const String &p_mode
 			return;
 		}
 
-		Dictionary started = pipeline->start(p_text, p_mode);
+		Dictionary started;
+		if (pipeline.is_valid() && pipeline->has_session_context()) {
+			started = pipeline->continue_session(p_text, p_mode);
+		} else {
+			started = pipeline->start(p_text, p_mode);
+		}
 		if (!(bool)started["ok"]) {
 			Dictionary error = started["error"];
 			dock->append_log("error", String(error["message"]));
@@ -651,6 +676,30 @@ void AIOSPlugin::_on_execute_plan_requested(const String &p_mode) {
 		return;
 	}
 
+	if (llm != nullptr && llm->is_configured()) {
+		if (pipeline.is_valid() && pipeline->is_running()) {
+			dock->append_log("warn", "A run is already in progress — stop it before executing the plan.");
+			return;
+		}
+
+		const String prompt =
+				"Implement the current plan and committed brief now. You are in " + p_mode +
+				" mode with full build tools. Continue from the existing conversation — do not restart the "
+				"clarification interview or re-propose the plan from scratch unless something is missing.";
+
+		Dictionary started;
+		if (pipeline.is_valid() && pipeline->has_session_context()) {
+			started = pipeline->continue_session(prompt, p_mode);
+		} else {
+			started = pipeline->start(prompt, p_mode);
+		}
+		if (!(bool)started["ok"]) {
+			Dictionary error = started["error"];
+			dock->append_log("error", String(error["message"]));
+		}
+		return;
+	}
+
 	Dictionary data;
 	data["mode"] = p_mode;
 	ipc->broadcast_event("execute_plan", data);
@@ -669,6 +718,66 @@ void AIOSPlugin::_on_stop_requested() {
 	if (ei != nullptr && ei->is_playing_scene()) {
 		ei->stop_playing_scene();
 		dock->append_log("info", "Stopped the running playtest.");
+	}
+}
+
+void AIOSPlugin::_on_history_cleared() {
+	if (pipeline.is_valid()) {
+		pipeline->reset_session();
+	}
+	chat_session.clear();
+	session_dirty = false;
+	session_save_accumulator = 0.0;
+	dock->set_state_name("IDLE", "");
+}
+
+void AIOSPlugin::_on_history_changed() {
+	_mark_chat_session_dirty();
+}
+
+void AIOSPlugin::_mark_chat_session_dirty() {
+	session_dirty = true;
+}
+
+void AIOSPlugin::_save_chat_session() {
+	if (dock == nullptr) {
+		return;
+	}
+
+	Dictionary data = chat_session.capture(dock, llm, pipeline.ptr());
+	bool has_content = !String(data.get("dock_text", "")).is_empty();
+	if (!has_content && data.has("llm_history")) {
+		has_content = Array(data["llm_history"]).size() > 0;
+	}
+	if (!has_content && data.has("pipeline")) {
+		Dictionary pipeline_state = data["pipeline"];
+		has_content = !String(pipeline_state.get("goal", "")).is_empty() ||
+				!Dictionary(pipeline_state.get("committed_brief", Dictionary())).is_empty() ||
+				!Dictionary(pipeline_state.get("pending_plan", Dictionary())).is_empty();
+	}
+	if (!has_content) {
+		chat_session.clear();
+		session_dirty = false;
+		return;
+	}
+
+	if (chat_session.save(data)) {
+		session_dirty = false;
+	}
+}
+
+void AIOSPlugin::_restore_chat_session() {
+	if (dock == nullptr || !chat_session.exists()) {
+		return;
+	}
+
+	const Dictionary data = chat_session.load();
+	if (data.is_empty()) {
+		return;
+	}
+
+	if (chat_session.apply(data, dock, llm, pipeline.ptr())) {
+		dock->append_log("info", "Restored the previous chat session from the last editor run.");
 	}
 }
 
@@ -857,6 +966,7 @@ void AIOSPlugin::_on_pipeline_run_finished(const Dictionary &p_summary) {
 	if (dock != nullptr) {
 		dock->append_log(ok ? "success" : "warn", String(p_summary.get("message", "Run finished.")));
 	}
+	_mark_chat_session_dirty();
 
 	// A run that touched the filesystem — a rollback, or scripts written to
 	// disk — leaves the editor's cached view stale until it rescans.

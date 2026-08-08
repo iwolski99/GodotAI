@@ -41,6 +41,11 @@ struct AIOSProviderConfig {
 	// client retries without it if the account lacks the beta.
 	bool use_fallbacks = true;
 
+	// Whether the configured model accepts image input. OpenRouter text-only
+	// models 404 when a screenshot is attached; this is inferred from the model
+	// id and updated automatically if a request is rejected.
+	bool vision_supported = true;
+
 	Dictionary to_dict() const;
 	static AIOSProviderConfig from_dict(const Dictionary &p_dict);
 };
@@ -83,6 +88,22 @@ public:
 
 	// Builds a canonical user message carrying tool results.
 	static Dictionary tool_result_message(const Array &p_results);
+
+	// Repairs duplicate/empty tool_use and tool_result ids in stored history.
+	// OpenRouter requires each tool message's tool_call_id to match the
+	// preceding assistant tool_calls entry; corrupted sessions wedge every tool.
+	static void sanitize_conversation_history(Array &r_history);
+
+	// Returns tool_use ids from the most recent assistant turn, in order.
+	static Array last_assistant_tool_use_ids(const Array &p_history);
+
+	// Forces tool_result blocks to use the assistant ids from the current batch.
+	static Array align_tool_results(const Array &p_results, const Array &p_assistant_tool_ids);
+
+	// Vision / multimodal helpers.
+	static bool infer_model_supports_vision(const String &p_provider, const String &p_model);
+	static bool is_image_input_error(int p_status, const String &p_raw_body);
+	static Array strip_images_from_tool_results(const Array &p_blocks);
 
 	// A canonical (Anthropic-shaped) image block. OpenRouter requests translate
 	// this into OpenAI's image_url form on the way out — and, because the OpenAI

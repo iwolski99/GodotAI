@@ -6,6 +6,7 @@
 #pragma once
 
 #include "../agent/aios_agent_memory.h"
+#include "../agent/aios_chat_session.h"
 #include "../agent/aios_credentials.h"
 #include "../agent/aios_llm_client.h"
 #include "../assets/aios_asset_pipeline.h"
@@ -39,7 +40,14 @@ private:
 
 	String session_token;
 	double status_accumulator = 0.0;
+	double session_save_accumulator = 0.0;
+	bool session_dirty = false;
 	int last_reported_clients = -1;
+
+	AIOSChatSession chat_session;
+	void _mark_chat_session_dirty();
+	void _save_chat_session();
+	void _restore_chat_session();
 
 	void _register_project_settings();
 	Variant _setting(const String &p_name, const Variant &p_default, int p_type, const String &p_hint_string = String());
@@ -67,6 +75,8 @@ private:
 	void _on_execute_plan_requested(const String &p_mode);
 	void _on_stop_requested();
 	void _on_rollback_requested();
+	void _on_history_cleared();
+	void _on_history_changed();
 	void _on_settings_changed(const Dictionary &p_settings);
 	void _on_api_key_submitted(const String &p_provider, const String &p_key);
 	void _on_api_key_cleared(const String &p_provider);

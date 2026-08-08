@@ -4,6 +4,7 @@
 
 #include "aios_chat_dock.h"
 
+#include "../aios_build_info.h"
 #include "../util/aios_json.h"
 
 #include <godot_cpp/classes/accept_dialog.hpp>
@@ -75,6 +76,8 @@ void AIOSChatDock::_bind_methods() {
 	ADD_SIGNAL(MethodInfo("execute_plan_requested", PropertyInfo(Variant::STRING, "mode")));
 	ADD_SIGNAL(MethodInfo("stop_requested"));
 	ADD_SIGNAL(MethodInfo("rollback_requested"));
+	ADD_SIGNAL(MethodInfo("history_cleared"));
+	ADD_SIGNAL(MethodInfo("history_changed"));
 	ADD_SIGNAL(MethodInfo("settings_changed", PropertyInfo(Variant::DICTIONARY, "settings")));
 	ADD_SIGNAL(MethodInfo("api_key_submitted", PropertyInfo(Variant::STRING, "provider"), PropertyInfo(Variant::STRING, "key")));
 	ADD_SIGNAL(MethodInfo("api_key_cleared", PropertyInfo(Variant::STRING, "provider")));
@@ -237,7 +240,7 @@ void AIOSChatDock::_build_settings_panel(VBoxContainer *p_root) {
 	settings_dialog->set_ok_button_text("Done");
 	// Closing with Done is all there is: every control applies its change the
 	// moment it is edited, so there is no separate save step to get wrong.
-	settings_dialog->set_min_size(Vector2i(460, 0));
+	settings_dialog->set_min_size(Vector2i(480, 520));
 	add_child(settings_dialog);
 
 	MarginContainer *margin = memnew(MarginContainer);
@@ -247,9 +250,15 @@ void AIOSChatDock::_build_settings_panel(VBoxContainer *p_root) {
 	margin->add_theme_constant_override("margin_bottom", 4);
 	settings_dialog->add_child(margin);
 
+	ScrollContainer *settings_scroll = memnew(ScrollContainer);
+	settings_scroll->set_custom_minimum_size(Vector2i(460, 460));
+	settings_scroll->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+	settings_scroll->set_v_size_flags(Control::SIZE_EXPAND_FILL);
+	margin->add_child(settings_scroll);
+
 	settings_panel = memnew(VBoxContainer);
 	settings_panel->add_theme_constant_override("separation", 2);
-	margin->add_child(settings_panel);
+	settings_scroll->add_child(settings_panel);
 
 	// --- provider ----------------------------------------------------------
 	settings_panel->add_child(make_caption("Provider"));
@@ -373,6 +382,25 @@ void AIOSChatDock::_build_settings_panel(VBoxContainer *p_root) {
 	max_tokens_field->set_tooltip_text("Ceiling for one reply. Reasoning tokens count against it, so leave headroom when effort is high.");
 	max_tokens_field->connect("value_changed", Callable(this, "_on_setting_changed"));
 	settings_panel->add_child(max_tokens_field);
+
+	settings_panel->add_child(make_caption("Max tool turns"));
+
+	max_turns_field = memnew(SpinBox);
+	max_turns_field->set_min(4);
+	max_turns_field->set_max(200);
+	max_turns_field->set_step(4);
+	max_turns_field->set_value(48);
+	make_shrinkable(max_turns_field);
+	max_turns_field->set_tooltip_text(
+			"Hard cap on model tool rounds per prompt. Building a game from scratch often needs more than the old default of 24.");
+	max_turns_field->connect("value_changed", Callable(this, "_on_setting_changed"));
+	settings_panel->add_child(max_turns_field);
+
+	Label *build_label = memnew(Label);
+	build_label->set_text("Extension build: " + String(AIOS_BUILD_LABEL));
+	build_label->add_theme_color_override("font_color", COLOR_MUTED);
+	build_label->add_theme_font_size_override("font_size", 11);
+	settings_panel->add_child(build_label);
 }
 
 String AIOSChatDock::_current_provider() const {
@@ -391,6 +419,7 @@ Dictionary AIOSChatDock::get_settings() const {
 	settings["show_thinking"] = show_thinking_toggle != nullptr && show_thinking_toggle->is_pressed();
 	settings["effort"] = effort_selector != nullptr ? effort_selector->get_item_text(effort_selector->get_selected()) : String("high");
 	settings["max_tokens"] = max_tokens_field != nullptr ? (int)max_tokens_field->get_value() : 16384;
+	settings["max_turns"] = max_turns_field != nullptr ? (int)max_turns_field->get_value() : 48;
 	return settings;
 }
 
@@ -417,6 +446,9 @@ void AIOSChatDock::set_settings(const Dictionary &p_settings) {
 	}
 	if (max_tokens_field != nullptr && p_settings.has("max_tokens")) {
 		max_tokens_field->set_value((double)(int64_t)p_settings["max_tokens"]);
+	}
+	if (max_turns_field != nullptr && p_settings.has("max_turns")) {
+		max_turns_field->set_value((double)(int64_t)p_settings["max_turns"]);
 	}
 	if (p_settings.has("model")) {
 		set_model_list(Array(), String(p_settings["model"]));
@@ -452,6 +484,9 @@ void AIOSChatDock::set_model_list(const Array &p_models, const String &p_selecte
 		const int context = (int)(int64_t)m.get("context", 0);
 		if (context > 0) {
 			label += " (" + String::num_int64(context / 1000) + "k)";
+		}
+		if (m.has("supports_vision") && !(bool)m["supports_vision"]) {
+			label += " [text-only]";
 		}
 		model_selector->add_item(label);
 		model_selector->set_item_metadata(model_selector->get_item_count() - 1, id);
@@ -647,6 +682,19 @@ String AIOSChatDock::get_selected_mode() const {
 	return mode_selector->get_item_text(mode_selector->get_selected()).to_lower();
 }
 
+void AIOSChatDock::set_selected_mode(const String &p_mode) {
+	if (mode_selector == nullptr || p_mode.is_empty()) {
+		return;
+	}
+	const String target = p_mode.to_lower();
+	for (int i = 0; i < mode_selector->get_item_count(); i++) {
+		if (mode_selector->get_item_text(i).to_lower() == target) {
+			mode_selector->select(i);
+			break;
+		}
+	}
+}
+
 /* -------------------------------------------------------------------------- */
 /*  Rendering                                                                  */
 /* -------------------------------------------------------------------------- */
@@ -688,8 +736,10 @@ void AIOSChatDock::_append_line(const String &p_bbcode) {
 	if (history == nullptr) {
 		return;
 	}
+	history_storage += p_bbcode + String("\n");
 	history->append_text(p_bbcode + String("\n"));
 	message_count++;
+	emit_signal("history_changed");
 }
 
 void AIOSChatDock::append_user(const String &p_text) {
@@ -779,8 +829,21 @@ void AIOSChatDock::clear_history() {
 	if (history != nullptr) {
 		history->clear();
 	}
+	history_storage = String();
 	message_count = 0;
 	append_log("info", "History cleared.");
+	emit_signal("history_cleared");
+}
+
+void AIOSChatDock::restore_history_text(const String &p_bbcode, int p_message_count) {
+	history_storage = p_bbcode;
+	message_count = p_message_count > 0 ? p_message_count : 0;
+	if (history != nullptr) {
+		history->clear();
+		if (!p_bbcode.is_empty()) {
+			history->append_text(p_bbcode);
+		}
+	}
 }
 
 /* -------------------------------------------------------------------------- */

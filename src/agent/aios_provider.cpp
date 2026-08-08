@@ -7,6 +7,7 @@
 #include "../util/aios_json.h"
 
 #include <godot_cpp/classes/json.hpp>
+#include <godot_cpp/classes/time.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #define ANTHROPIC_VERSION "2023-06-01"
@@ -28,6 +29,7 @@ Dictionary AIOSProviderConfig::to_dict() const {
 	d["show_thinking"] = show_thinking;
 	d["effort"] = effort;
 	d["use_fallbacks"] = use_fallbacks;
+	d["vision_supported"] = vision_supported;
 	return d;
 }
 
@@ -40,6 +42,11 @@ AIOSProviderConfig AIOSProviderConfig::from_dict(const Dictionary &p_dict) {
 	c.show_thinking = AIOSJson::get_bool(p_dict, "show_thinking", c.show_thinking);
 	c.effort = AIOSJson::get_string(p_dict, "effort", c.effort);
 	c.use_fallbacks = AIOSJson::get_bool(p_dict, "use_fallbacks", c.use_fallbacks);
+	if (p_dict.has("vision_supported")) {
+		c.vision_supported = AIOSJson::get_bool(p_dict, "vision_supported", c.vision_supported);
+	} else {
+		c.vision_supported = AIOSProvider::infer_model_supports_vision(c.provider, c.model);
+	}
 	return c;
 }
 
@@ -316,11 +323,14 @@ Dictionary AIOSProvider::build_request(const AIOSProviderConfig &p_config,
 	String note;
 	const String effort = clamp_effort(p_config, note);
 
+	Array messages = p_messages;
+	sanitize_conversation_history(messages);
+
 	Dictionary body;
 	body["model"] = p_config.model;
 
 	if (p_config.provider == "openrouter") {
-		body["messages"] = to_openai_messages(p_system, p_messages);
+		body["messages"] = to_openai_messages(p_system, messages);
 		body["max_tokens"] = p_config.max_tokens;
 		if (p_tools.size() > 0) {
 			body["tools"] = to_openai_tools(p_tools);
@@ -350,7 +360,7 @@ Dictionary AIOSProvider::build_request(const AIOSProviderConfig &p_config,
 	if (!p_system.strip_edges().is_empty()) {
 		body["system"] = p_system;
 	}
-	body["messages"] = p_messages;
+	body["messages"] = messages;
 	if (p_tools.size() > 0) {
 		body["tools"] = p_tools;
 	}
@@ -390,6 +400,288 @@ Dictionary AIOSProvider::tool_result_message(const Array &p_results) {
 	msg["role"] = "user";
 	msg["content"] = p_results;
 	return msg;
+}
+
+static String ensure_unique_tool_id(const String &p_id, int p_index, Dictionary &r_used) {
+	String id = p_id.strip_edges();
+	if (id.is_empty() || r_used.has(id)) {
+		id = "call_" + String::num_int64(p_index) + "_" +
+				String::num_uint64((uint64_t)Time::get_singleton()->get_ticks_usec() & 0xfffff);
+	}
+	r_used[id] = true;
+	return id;
+}
+
+static void normalize_tool_call_ids(Array &r_calls) {
+	Dictionary used;
+	for (int i = 0; i < r_calls.size(); i++) {
+		Dictionary call = r_calls[i];
+		call["id"] = ensure_unique_tool_id(String(call.get("id", "")), i, used);
+		r_calls[i] = call;
+	}
+}
+
+static Array extract_tool_use_ids_from_content(const Array &p_blocks) {
+	Array ids;
+	for (int i = 0; i < p_blocks.size(); i++) {
+		if (Variant(p_blocks[i]).get_type() != Variant::DICTIONARY) {
+			continue;
+		}
+		Dictionary block = p_blocks[i];
+		if (String(block.get("type", "")) == "tool_use") {
+			ids.push_back(String(block.get("id", "")));
+		}
+	}
+	return ids;
+}
+
+static void normalize_assistant_tool_uses(Dictionary &r_msg) {
+	Variant content = r_msg.get("content", Array());
+	if (content.get_type() != Variant::ARRAY) {
+		return;
+	}
+
+	Array blocks = content;
+	Dictionary used;
+	int tool_idx = 0;
+	for (int i = 0; i < blocks.size(); i++) {
+		if (Variant(blocks[i]).get_type() != Variant::DICTIONARY) {
+			continue;
+		}
+		Dictionary block = blocks[i];
+		if (String(block.get("type", "")) != "tool_use") {
+			continue;
+		}
+		block["id"] = ensure_unique_tool_id(String(block.get("id", "")), tool_idx, used);
+		blocks[i] = block;
+		tool_idx++;
+	}
+	r_msg["content"] = blocks;
+}
+
+static void align_tool_results_in_message(Dictionary &r_msg, const Array &p_assistant_tool_ids) {
+	Variant content = r_msg.get("content", Array());
+	if (content.get_type() != Variant::ARRAY) {
+		return;
+	}
+
+	Array blocks = content;
+	Dictionary used;
+	int result_idx = 0;
+	for (int i = 0; i < blocks.size(); i++) {
+		if (Variant(blocks[i]).get_type() != Variant::DICTIONARY) {
+			continue;
+		}
+		Dictionary block = blocks[i];
+		if (String(block.get("type", "")) != "tool_result") {
+			continue;
+		}
+
+		String id = String(block.get("tool_use_id", "")).strip_edges();
+		if (result_idx < p_assistant_tool_ids.size()) {
+			const String expected = String(p_assistant_tool_ids[result_idx]).strip_edges();
+			if (!expected.is_empty()) {
+				id = expected;
+			}
+		}
+		block["tool_use_id"] = ensure_unique_tool_id(id, result_idx, used);
+		blocks[i] = block;
+		result_idx++;
+	}
+	r_msg["content"] = blocks;
+}
+
+void AIOSProvider::sanitize_conversation_history(Array &r_history) {
+	Array pending_assistant_ids;
+	for (int i = 0; i < r_history.size(); i++) {
+		if (Variant(r_history[i]).get_type() != Variant::DICTIONARY) {
+			continue;
+		}
+		Dictionary msg = r_history[i];
+		const String role = String(msg.get("role", "user"));
+
+		if (role == "assistant") {
+			normalize_assistant_tool_uses(msg);
+			pending_assistant_ids = extract_tool_use_ids_from_content(msg.get("content", Array()));
+			r_history[i] = msg;
+		} else if (role == "user" && pending_assistant_ids.size() > 0) {
+			align_tool_results_in_message(msg, pending_assistant_ids);
+			pending_assistant_ids.clear();
+			r_history[i] = msg;
+		}
+	}
+}
+
+Array AIOSProvider::last_assistant_tool_use_ids(const Array &p_history) {
+	for (int i = p_history.size() - 1; i >= 0; i--) {
+		if (Variant(p_history[i]).get_type() != Variant::DICTIONARY) {
+			continue;
+		}
+		Dictionary msg = p_history[i];
+		if (String(msg.get("role", "")) != "assistant") {
+			continue;
+		}
+		Variant content = msg.get("content", Array());
+		if (content.get_type() != Variant::ARRAY) {
+			continue;
+		}
+		Array ids = extract_tool_use_ids_from_content(content);
+		if (ids.size() > 0) {
+			return ids;
+		}
+	}
+	return Array();
+}
+
+Array AIOSProvider::align_tool_results(const Array &p_results, const Array &p_assistant_tool_ids) {
+	Array aligned;
+	Dictionary used;
+	int result_idx = 0;
+	for (int i = 0; i < p_results.size(); i++) {
+		if (Variant(p_results[i]).get_type() != Variant::DICTIONARY) {
+			aligned.push_back(p_results[i]);
+			continue;
+		}
+		Dictionary block = p_results[i];
+		if (String(block.get("type", "")) != "tool_result") {
+			aligned.push_back(block);
+			continue;
+		}
+
+		String id = String(block.get("tool_use_id", "")).strip_edges();
+		if (result_idx < p_assistant_tool_ids.size()) {
+			const String expected = String(p_assistant_tool_ids[result_idx]).strip_edges();
+			if (!expected.is_empty()) {
+				id = expected;
+			}
+		}
+		block["tool_use_id"] = ensure_unique_tool_id(id, result_idx, used);
+		aligned.push_back(block);
+		result_idx++;
+	}
+	return aligned;
+}
+
+bool AIOSProvider::infer_model_supports_vision(const String &p_provider, const String &p_model) {
+	if (p_provider == "anthropic") {
+		return true;
+	}
+
+	const String model = p_model.to_lower();
+	if (model.is_empty()) {
+		return true;
+	}
+
+	// Common OpenRouter vision-capable families.
+	if (model.contains("claude")) {
+		return true;
+	}
+	if (model.contains("gpt-4o") || model.contains("gpt-4.1") || model.contains("gpt-5")) {
+		return true;
+	}
+	if (model.contains("gemini") && (model.contains("pro") || model.contains("flash") || model.contains("vision"))) {
+		return true;
+	}
+	if (model.contains("llava") || model.contains("pixtral") || model.contains("qwen-vl") ||
+			model.contains("vision")) {
+		return true;
+	}
+
+	// Known text-only families on OpenRouter.
+	if (model.contains("deepseek") && !model.contains("vl")) {
+		return false;
+	}
+	if (model.contains("llama") || model.contains("mistral") || model.contains("mixtral")) {
+		return false;
+	}
+	if (model.contains("composer") || model.contains("minimax") || model.contains("phi")) {
+		return false;
+	}
+
+	// Unknown id: try images once; the client retries without them on rejection.
+	return true;
+}
+
+bool AIOSProvider::is_image_input_error(int p_status, const String &p_raw_body) {
+	const String lower = p_raw_body.to_lower();
+	if (!lower.contains("image")) {
+		return false;
+	}
+	if (lower.contains("image input") || lower.contains("multimodal") || lower.contains("vision")) {
+		return true;
+	}
+	if (lower.contains("does not support") && lower.contains("image")) {
+		return true;
+	}
+	// OpenRouter returns 404 for "No endpoints found that support image input".
+	return p_status == 404 && lower.contains("endpoint");
+}
+
+Array AIOSProvider::strip_images_from_tool_results(const Array &p_blocks) {
+	Array out;
+	for (int i = 0; i < p_blocks.size(); i++) {
+		if (Variant(p_blocks[i]).get_type() != Variant::DICTIONARY) {
+			out.push_back(p_blocks[i]);
+			continue;
+		}
+
+		Dictionary block = p_blocks[i];
+		if (String(block.get("type", "")) != "tool_result") {
+			out.push_back(block);
+			continue;
+		}
+
+		Variant content = block.get("content", "");
+		if (content.get_type() != Variant::ARRAY) {
+			out.push_back(block);
+			continue;
+		}
+
+		Array inner = content;
+		String flat;
+		bool had_image = false;
+		for (int k = 0; k < inner.size(); k++) {
+			if (Variant(inner[k]).get_type() != Variant::DICTIONARY) {
+				continue;
+			}
+			Dictionary ib = inner[k];
+			const String itype = String(ib.get("type", ""));
+			if (itype == "image") {
+				had_image = true;
+			} else if (itype == "text") {
+				if (!flat.is_empty()) {
+					flat += "\n";
+				}
+				flat += String(ib.get("text", ""));
+			}
+		}
+
+		if (had_image) {
+			Dictionary note;
+			note["vision_unavailable"] = true;
+			note["message"] =
+					"The screenshot was captured and saved to disk, but the configured model cannot accept "
+					"images. Open the PNG path locally, switch to a vision-capable model (e.g. Claude or GPT-4o "
+					"on OpenRouter), or continue using get_world_model and validate_scene instead.";
+			if (!flat.is_empty()) {
+				Variant parsed = JSON::parse_string(flat);
+				if (parsed.get_type() == Variant::DICTIONARY) {
+					Dictionary meta = parsed;
+					meta["vision_unavailable"] = true;
+					meta["message"] = note["message"];
+					flat = JSON::stringify(meta);
+				} else {
+					flat += "\n" + JSON::stringify(note);
+				}
+			} else {
+				flat = JSON::stringify(note);
+			}
+		}
+
+		block["content"] = flat.is_empty() ? String("(no textual tool result)") : flat;
+		out.push_back(block);
+	}
+	return out;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -448,6 +740,20 @@ static Dictionary parse_anthropic(const Dictionary &p_body) {
 		}
 	}
 
+	normalize_tool_call_ids(tool_calls);
+	int call_idx = 0;
+	for (int i = 0; i < content.size(); i++) {
+		if (Variant(content[i]).get_type() != Variant::DICTIONARY) {
+			continue;
+		}
+		Dictionary block = content[i];
+		if (String(block.get("type", "")) == "tool_use" && call_idx < tool_calls.size()) {
+			block["id"] = Dictionary(tool_calls[call_idx])["id"];
+			content[i] = block;
+			call_idx++;
+		}
+	}
+
 	out["text"] = text;
 	out["thinking"] = thinking;
 	out["tool_calls"] = tool_calls;
@@ -500,6 +806,8 @@ static Dictionary parse_openrouter(const Dictionary &p_body) {
 		}
 		tool_calls.push_back(call);
 	}
+
+	normalize_tool_call_ids(tool_calls);
 
 	out["text"] = text;
 	out["thinking"] = thinking;
@@ -567,7 +875,12 @@ Dictionary AIOSProvider::parse_error(const String &p_provider, int p_status, con
 	if (p_status == 401 || p_status == 403) {
 		hint = " Check the API key in the AI Agent dock's Settings panel.";
 	} else if (p_status == 404) {
-		hint = " The model ID may be wrong for this provider - pick one from the model dropdown.";
+		if (is_image_input_error(p_status, p_raw_body)) {
+			hint = " This model cannot accept images. Switch to a vision-capable model (Claude, GPT-4o, Gemini, "
+				   "etc.) in Settings, or the agent will continue without sending screenshots.";
+		} else {
+			hint = " The model ID may be wrong for this provider - pick one from the model dropdown.";
+		}
 	} else if (p_status == 429) {
 		hint = " Rate limited. Wait a moment, or lower the reasoning effort to spend fewer tokens.";
 	} else if (p_status >= 500) {
@@ -595,6 +908,22 @@ Array AIOSProvider::parse_models(const String &p_provider, const Dictionary &p_b
 		if (p_provider == "openrouter") {
 			entry["name"] = model.get("name", model.get("id", ""));
 			entry["context"] = model.get("context_length", 0);
+			Dictionary architecture = model.get("architecture", Dictionary());
+			const String modality = String(architecture.get("modality", "")).to_lower();
+			Array input_modalities = architecture.get("input_modalities", Array());
+			bool supports_vision = modality.contains("image");
+			if (!supports_vision) {
+				for (int m = 0; m < input_modalities.size(); m++) {
+					if (String(input_modalities[m]).to_lower() == "image") {
+						supports_vision = true;
+						break;
+					}
+				}
+			}
+			if (!supports_vision) {
+				supports_vision = infer_model_supports_vision("openrouter", String(entry["id"]));
+			}
+			entry["supports_vision"] = supports_vision;
 			Dictionary pricing = model.get("pricing", Dictionary());
 			if (!pricing.is_empty()) {
 				entry["prompt_price"] = pricing.get("prompt", "");
@@ -604,6 +933,7 @@ Array AIOSProvider::parse_models(const String &p_provider, const Dictionary &p_b
 			entry["name"] = model.get("display_name", model.get("id", ""));
 			entry["context"] = model.get("max_input_tokens", 0);
 			entry["max_output"] = model.get("max_tokens", 0);
+			entry["supports_vision"] = true;
 		}
 		out.push_back(entry);
 	}
