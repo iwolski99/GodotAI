@@ -75,6 +75,7 @@ void AIOSChatDock::_bind_methods() {
 	ADD_SIGNAL(MethodInfo("execute_plan_requested", PropertyInfo(Variant::STRING, "mode")));
 	ADD_SIGNAL(MethodInfo("stop_requested"));
 	ADD_SIGNAL(MethodInfo("rollback_requested"));
+	ADD_SIGNAL(MethodInfo("history_cleared"));
 	ADD_SIGNAL(MethodInfo("settings_changed", PropertyInfo(Variant::DICTIONARY, "settings")));
 	ADD_SIGNAL(MethodInfo("api_key_submitted", PropertyInfo(Variant::STRING, "provider"), PropertyInfo(Variant::STRING, "key")));
 	ADD_SIGNAL(MethodInfo("api_key_cleared", PropertyInfo(Variant::STRING, "provider")));
@@ -781,6 +782,7 @@ void AIOSChatDock::clear_history() {
 	}
 	message_count = 0;
 	append_log("info", "History cleared.");
+	emit_signal("history_cleared");
 }
 
 /* -------------------------------------------------------------------------- */

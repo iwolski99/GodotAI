@@ -17,6 +17,9 @@ void AIOSPipeline::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("_on_playtest_finished", "report"), &AIOSPipeline::_on_playtest_finished);
 
 	ClassDB::bind_method(D_METHOD("start", "goal", "mode"), &AIOSPipeline::start);
+	ClassDB::bind_method(D_METHOD("continue_session", "text", "mode"), &AIOSPipeline::continue_session);
+	ClassDB::bind_method(D_METHOD("reset_session"), &AIOSPipeline::reset_session);
+	ClassDB::bind_method(D_METHOD("has_session_context"), &AIOSPipeline::has_session_context);
 	ClassDB::bind_method(D_METHOD("continue_with_user_answer", "answer"), &AIOSPipeline::continue_with_user_answer);
 	ClassDB::bind_method(D_METHOD("skip_clarification_and_build"), &AIOSPipeline::skip_clarification_and_build);
 	ClassDB::bind_method(D_METHOD("stop"), &AIOSPipeline::stop);
@@ -284,6 +287,18 @@ String AIOSPipeline::_format_brief(const Dictionary &p_brief) {
 	return out;
 }
 
+String AIOSPipeline::_format_plan(const Dictionary &p_plan) {
+	String out = String(p_plan.get("summary", ""));
+	Array steps = p_plan.get("steps", Array());
+	if (steps.size() > 0) {
+		out += "\n\nSteps:\n";
+		for (int i = 0; i < steps.size(); i++) {
+			out += String::num_int64(i + 1) + ". " + String(steps[i]) + "\n";
+		}
+	}
+	return out;
+}
+
 Dictionary AIOSPipeline::_minimal_brief_from_goal(const String &p_goal) {
 	Dictionary brief;
 	brief["title"] = "Untitled prototype";
@@ -343,6 +358,131 @@ void AIOSPipeline::_enter_build_phase(const Dictionary &p_brief, bool p_skipped_
 					? "Interview skipped. Building from a minimal brief derived from your goal."
 					: "Brief locked. Build tools unlocked — implementing now.");
 	emit_signal("agent_message", String("**Game brief**\n\n") + _format_brief(committed_brief));
+}
+
+String AIOSPipeline::_build_session_message(const String &p_text, const String &p_previous_mode,
+		bool p_mode_changed) const {
+	String message;
+
+	if (p_mode_changed) {
+		message += "[System: Role switched from " + p_previous_mode + " to " + mode + ". ";
+		message += "Continue the same task using the conversation above. ";
+		if (mode.to_lower() == "coder") {
+			message +=
+					"You now have full mutating build tools. Implement the committed brief and any approved "
+					"plan — do not restart the interview or re-propose from scratch unless something is "
+					"genuinely missing.";
+		} else if (mode.to_lower() == "architect") {
+			message += "Focus on planning and inspection; mutating tools are not available in this role.";
+		}
+		message += "]\n\n";
+	}
+
+	if (!committed_brief.is_empty()) {
+		message += "## Committed brief (still in effect)\n\n" + _format_brief(committed_brief) + "\n";
+	}
+	if (!pending_plan.is_empty()) {
+		message += "## Plan from the prior role\n\n" + _format_plan(pending_plan) + "\n";
+	}
+
+	message += p_text;
+	return message;
+}
+
+void AIOSPipeline::_prepare_run_state(const String &p_goal, const String &p_mode, bool p_fresh_session) {
+	goal = p_goal;
+	mode = p_mode;
+	repair_attempts = 0;
+	steps_executed = 0;
+	pending_results.clear();
+	deferred_calls.clear();
+	awaiting_playtest = false;
+	awaiting_user = false;
+	ask_user_tool_use_id = String();
+	pending_questions.clear();
+	propose_plan_tool_use_id = String();
+	batch_had_mutations = false;
+
+	if (p_fresh_session) {
+		committed_brief.clear();
+		brief_ready = false;
+		clarifying = _mode_requires_brief(mode);
+		awaiting_plan_approval = false;
+		plan_approved = false;
+		pending_plan.clear();
+	} else {
+		const bool has_prior_conversation = llm != nullptr && llm->get_history().size() > 0;
+		if (!committed_brief.is_empty()) {
+			brief_ready = true;
+			clarifying = false;
+		} else if (has_prior_conversation) {
+			// The prior role already interviewed or planned in chat — do not restart.
+			clarifying = false;
+		} else {
+			clarifying = _mode_requires_brief(mode) && !brief_ready;
+		}
+
+		// A handoff into coder mode means the human wants implementation now.
+		if (mode.to_lower() == "coder" && !pending_plan.is_empty()) {
+			awaiting_plan_approval = false;
+			plan_approved = true;
+		}
+	}
+
+	if (registry.is_valid()) {
+		registry->set_active_role(mode);
+	}
+	if (memory.is_valid()) {
+		memory->load();
+	}
+}
+
+bool AIOSPipeline::has_session_context() const {
+	if (llm != nullptr && llm->get_history().size() > 0) {
+		return true;
+	}
+	if (!committed_brief.is_empty()) {
+		return true;
+	}
+	if (!pending_plan.is_empty()) {
+		return true;
+	}
+	if (!goal.is_empty() && brief_ready) {
+		return true;
+	}
+	return false;
+}
+
+void AIOSPipeline::reset_session() {
+	if (is_running()) {
+		stop();
+	}
+
+	goal.clear();
+	mode = "architect";
+	committed_brief.clear();
+	brief_ready = false;
+	clarifying = false;
+	pending_plan.clear();
+	awaiting_plan_approval = false;
+	plan_approved = false;
+	propose_plan_tool_use_id = String();
+	pending_results.clear();
+	deferred_calls.clear();
+	awaiting_playtest = false;
+	awaiting_user = false;
+	ask_user_tool_use_id = String();
+	pending_questions.clear();
+	batch_had_mutations = false;
+	stage = STAGE_IDLE;
+
+	if (llm != nullptr) {
+		llm->cancel();
+		llm->reset_conversation();
+	}
+	if (registry.is_valid()) {
+		registry->set_active_role(String());
+	}
 }
 
 /* -------------------------------------------------------------------------- */
@@ -465,31 +605,7 @@ Dictionary AIOSPipeline::start(const String &p_goal, const String &p_mode) {
 				"No model is configured. Open the AI Agent dock's Settings panel and add an API key.");
 	}
 
-	goal = p_goal;
-	mode = p_mode;
-	repair_attempts = 0;
-	steps_executed = 0;
-	pending_results.clear();
-	deferred_calls.clear();
-	awaiting_playtest = false;
-	awaiting_user = false;
-	ask_user_tool_use_id = String();
-	pending_questions.clear();
-	committed_brief.clear();
-	brief_ready = false;
-	clarifying = _mode_requires_brief(mode);
-	awaiting_plan_approval = false;
-	plan_approved = false;
-	pending_plan.clear();
-	propose_plan_tool_use_id = String();
-	batch_had_mutations = false;
-
-	if (registry.is_valid()) {
-		registry->set_active_role(mode);
-	}
-	if (memory.is_valid()) {
-		memory->load();
-	}
+	_prepare_run_state(p_goal, p_mode, true);
 
 	const bool git_ok = git.is_valid() && git->is_available();
 	if (!git_ok) {
@@ -532,6 +648,67 @@ Dictionary AIOSPipeline::start(const String &p_goal, const String &p_mode) {
 	result["model"] = llm->describe_target();
 	result["git"] = git_ok;
 	result["clarifying"] = clarifying;
+	result["continued"] = false;
+	return AIOSJson::ok(result);
+}
+
+Dictionary AIOSPipeline::continue_session(const String &p_text, const String &p_mode) {
+	if (stage != STAGE_IDLE && stage != STAGE_ERROR) {
+		return AIOSJson::error("already_running",
+				"A run is already in progress (" + get_stage_name() + "). Stop it before continuing.");
+	}
+	if (llm == nullptr || !llm->is_configured()) {
+		return AIOSJson::error("no_model",
+				"No model is configured. Open the AI Agent dock's Settings panel and add an API key.");
+	}
+	if (llm->is_busy()) {
+		return AIOSJson::error("busy", "A model request is already in flight.");
+	}
+	if (!has_session_context()) {
+		return start(p_text, p_mode);
+	}
+
+	const String previous_mode = mode;
+	const bool mode_changed = previous_mode.to_lower() != p_mode.to_lower();
+	const String session_goal = goal.is_empty() ? p_text : goal;
+
+	_prepare_run_state(session_goal, p_mode, false);
+
+	const bool git_ok = git.is_valid() && git->is_available();
+	if (git_ok) {
+		Dictionary snap = git->create_snapshot("session continue: " + p_text.substr(0, 60));
+		if ((bool)snap["ok"]) {
+			last_good_snapshot = String(Dictionary(snap["result"])["sha"]);
+		}
+	}
+
+	llm->set_system_prompt(build_system_prompt(mode, git_ok, clarifying, _memory_block()));
+	_apply_tools_for_phase();
+
+	const String message = _build_session_message(p_text, previous_mode, mode_changed);
+
+	if (clarifying) {
+		_set_stage(STAGE_CLARIFYING, "continuing clarification in " + mode);
+	} else {
+		_set_stage(STAGE_PLANNING, "continuing in " + mode + " — " + llm->describe_target());
+	}
+
+	if (mode_changed) {
+		emit_signal("pipeline_log", "info",
+				"Continuing the session in " + mode + " mode with prior chat history preserved.");
+	}
+
+	llm->send_user_message(message);
+
+	Dictionary result;
+	result["goal"] = goal;
+	result["mode"] = mode;
+	result["previous_mode"] = previous_mode;
+	result["model"] = llm->describe_target();
+	result["git"] = git_ok;
+	result["clarifying"] = clarifying;
+	result["continued"] = true;
+	result["mode_changed"] = mode_changed;
 	return AIOSJson::ok(result);
 }
 
@@ -687,12 +864,18 @@ void AIOSPipeline::stop() {
 	pending_questions.clear();
 	pending_results.clear();
 	deferred_calls.clear();
-	clarifying = false;
-	brief_ready = false;
-	awaiting_plan_approval = false;
-	plan_approved = false;
-	pending_plan.clear();
 	propose_plan_tool_use_id = String();
+
+	// Preserve brief/plan artifacts so a mode switch or follow-up prompt can
+	// continue the same session without re-interviewing.
+	if (committed_brief.is_empty()) {
+		brief_ready = false;
+		clarifying = false;
+	} else {
+		brief_ready = true;
+		clarifying = false;
+	}
+
 	if (registry.is_valid()) {
 		registry->set_active_role(String());
 	}

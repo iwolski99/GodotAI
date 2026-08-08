@@ -67,6 +67,7 @@ private:
 	void _on_execute_plan_requested(const String &p_mode);
 	void _on_stop_requested();
 	void _on_rollback_requested();
+	void _on_history_cleared();
 	void _on_settings_changed(const Dictionary &p_settings);
 	void _on_api_key_submitted(const String &p_provider, const String &p_key);
 	void _on_api_key_cleared(const String &p_provider);

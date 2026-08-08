@@ -61,6 +61,7 @@ void AIOSPlugin::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("_on_execute_plan_requested", "mode"), &AIOSPlugin::_on_execute_plan_requested);
 	ClassDB::bind_method(D_METHOD("_on_stop_requested"), &AIOSPlugin::_on_stop_requested);
 	ClassDB::bind_method(D_METHOD("_on_rollback_requested"), &AIOSPlugin::_on_rollback_requested);
+	ClassDB::bind_method(D_METHOD("_on_history_cleared"), &AIOSPlugin::_on_history_cleared);
 	ClassDB::bind_method(D_METHOD("_on_scene_changed", "root"), &AIOSPlugin::_on_scene_changed);
 	ClassDB::bind_method(D_METHOD("_on_scene_saved", "path"), &AIOSPlugin::_on_scene_saved);
 
@@ -346,6 +347,7 @@ void AIOSPlugin::_enter_tree() {
 	dock->connect("execute_plan_requested", Callable(this, "_on_execute_plan_requested"));
 	dock->connect("stop_requested", Callable(this, "_on_stop_requested"));
 	dock->connect("rollback_requested", Callable(this, "_on_rollback_requested"));
+	dock->connect("history_cleared", Callable(this, "_on_history_cleared"));
 	dock->connect("settings_changed", Callable(this, "_on_settings_changed"));
 	dock->connect("api_key_submitted", Callable(this, "_on_api_key_submitted"));
 	dock->connect("api_key_cleared", Callable(this, "_on_api_key_cleared"));
@@ -608,7 +610,12 @@ void AIOSPlugin::_on_prompt_submitted(const String &p_text, const String &p_mode
 			return;
 		}
 
-		Dictionary started = pipeline->start(p_text, p_mode);
+		Dictionary started;
+		if (pipeline.is_valid() && pipeline->has_session_context()) {
+			started = pipeline->continue_session(p_text, p_mode);
+		} else {
+			started = pipeline->start(p_text, p_mode);
+		}
 		if (!(bool)started["ok"]) {
 			Dictionary error = started["error"];
 			dock->append_log("error", String(error["message"]));
@@ -670,6 +677,13 @@ void AIOSPlugin::_on_stop_requested() {
 		ei->stop_playing_scene();
 		dock->append_log("info", "Stopped the running playtest.");
 	}
+}
+
+void AIOSPlugin::_on_history_cleared() {
+	if (pipeline.is_valid()) {
+		pipeline->reset_session();
+	}
+	dock->set_state_name("IDLE", "");
 }
 
 void AIOSPlugin::_on_rollback_requested() {
