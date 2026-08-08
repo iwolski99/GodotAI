@@ -401,7 +401,8 @@ void AIOSPipeline::_prepare_run_state(const String &p_goal, const String &p_mode
 	ask_user_tool_use_id = String();
 	pending_questions.clear();
 	propose_plan_tool_use_id = String();
-	batch_had_mutations = false;
+	batch_saved_scene = false;
+	batch_had_scene_edits = false;
 
 	if (p_fresh_session) {
 		committed_brief.clear();
@@ -473,7 +474,8 @@ void AIOSPipeline::reset_session() {
 	awaiting_user = false;
 	ask_user_tool_use_id = String();
 	pending_questions.clear();
-	batch_had_mutations = false;
+	batch_saved_scene = false;
+	batch_had_scene_edits = false;
 	stage = STAGE_IDLE;
 
 	if (llm != nullptr) {
@@ -998,7 +1000,8 @@ void AIOSPipeline::_on_model_failed(const Dictionary &p_error) {
 void AIOSPipeline::_handle_tool_calls(const Array &p_calls) {
 	pending_results.clear();
 	deferred_calls.clear();
-	batch_had_mutations = false;
+	batch_saved_scene = false;
+	batch_had_scene_edits = false;
 
 	// One snapshot per batch, not per call. A model routinely emits several
 	// calls that only make sense together (create a node, then attach its
@@ -1250,8 +1253,11 @@ void AIOSPipeline::_execute_call(const Dictionary &p_call) {
 
 	if (ok) {
 		steps_executed++;
-		if (AIOSToolRegistry::is_mutating(tool)) {
-			batch_had_mutations = true;
+		if (tool == "save_scene") {
+			batch_saved_scene = true;
+		}
+		if (AIOSToolRegistry::is_scene_edit(tool)) {
+			batch_had_scene_edits = true;
 		}
 		_push_result(id, envelope["result"], false);
 	} else {
@@ -1381,18 +1387,19 @@ void AIOSPipeline::_finish_turn() {
 	// --- success -----------------------------------------------------------
 	repair_attempts = 0;
 
-	// Auto-playtest after a mutating batch so the Observe stage is not skipped
-	// when the model forgets to call run_playtest.
-	if (auto_playtest && batch_had_mutations && playtest.is_valid() && !awaiting_playtest) {
-		_set_stage(STAGE_PLAYTESTING, "auto smoke test after edits");
+	// Auto-playtest only after the agent saved scene edits to disk. Running the
+	// main scene before that tests stale files and spams the dock during planning.
+	if (auto_playtest && batch_saved_scene && batch_had_scene_edits && playtest.is_valid() && !awaiting_playtest) {
+		_set_stage(STAGE_PLAYTESTING, "auto smoke test after scene save");
 		Dictionary play_params;
 		play_params["timeout_sec"] = 20;
 		Dictionary launched = playtest->start(play_params);
 		if ((bool)launched["ok"]) {
 			awaiting_playtest = true;
 			playtest_tool_use_id = "__auto_playtest__";
-			batch_had_mutations = false;
-			emit_signal("pipeline_log", "info", "Running automatic playtest after mutating edits.");
+			batch_saved_scene = false;
+			batch_had_scene_edits = false;
+			emit_signal("pipeline_log", "info", "Running automatic playtest after the scene was saved.");
 			return;
 		}
 		emit_signal("pipeline_log", "warn",

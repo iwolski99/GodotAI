@@ -75,6 +75,7 @@ private:
 	CheckBox *show_thinking_toggle = nullptr;
 	OptionButton *effort_selector = nullptr;
 	SpinBox *max_tokens_field = nullptr;
+	SpinBox *max_turns_field = nullptr;
 
 	State state = STATE_IDLE;
 	String session_token;

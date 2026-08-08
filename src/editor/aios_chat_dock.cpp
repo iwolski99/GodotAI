@@ -374,6 +374,19 @@ void AIOSChatDock::_build_settings_panel(VBoxContainer *p_root) {
 	max_tokens_field->set_tooltip_text("Ceiling for one reply. Reasoning tokens count against it, so leave headroom when effort is high.");
 	max_tokens_field->connect("value_changed", Callable(this, "_on_setting_changed"));
 	settings_panel->add_child(max_tokens_field);
+
+	settings_panel->add_child(make_caption("Max tool turns"));
+
+	max_turns_field = memnew(SpinBox);
+	max_turns_field->set_min(4);
+	max_turns_field->set_max(200);
+	max_turns_field->set_step(4);
+	max_turns_field->set_value(48);
+	make_shrinkable(max_turns_field);
+	max_turns_field->set_tooltip_text(
+			"Hard cap on model tool rounds per prompt. Building a game from scratch often needs more than the old default of 24.");
+	max_turns_field->connect("value_changed", Callable(this, "_on_setting_changed"));
+	settings_panel->add_child(max_turns_field);
 }
 
 String AIOSChatDock::_current_provider() const {
@@ -392,6 +405,7 @@ Dictionary AIOSChatDock::get_settings() const {
 	settings["show_thinking"] = show_thinking_toggle != nullptr && show_thinking_toggle->is_pressed();
 	settings["effort"] = effort_selector != nullptr ? effort_selector->get_item_text(effort_selector->get_selected()) : String("high");
 	settings["max_tokens"] = max_tokens_field != nullptr ? (int)max_tokens_field->get_value() : 16384;
+	settings["max_turns"] = max_turns_field != nullptr ? (int)max_turns_field->get_value() : 48;
 	return settings;
 }
 
@@ -418,6 +432,9 @@ void AIOSChatDock::set_settings(const Dictionary &p_settings) {
 	}
 	if (max_tokens_field != nullptr && p_settings.has("max_tokens")) {
 		max_tokens_field->set_value((double)(int64_t)p_settings["max_tokens"]);
+	}
+	if (max_turns_field != nullptr && p_settings.has("max_turns")) {
+		max_turns_field->set_value((double)(int64_t)p_settings["max_turns"]);
 	}
 	if (p_settings.has("model")) {
 		set_model_list(Array(), String(p_settings["model"]));

@@ -138,7 +138,7 @@ void AIOSPlugin::_register_project_settings() {
 	_setting(SETTING_EFFORT, 2, Variant::INT, "low,medium,high,xhigh,max");
 	_setting(SETTING_MAX_TOKENS, 16384, Variant::INT);
 
-	_setting(SETTING_MAX_TURNS, 24, Variant::INT);
+	_setting(SETTING_MAX_TURNS, 48, Variant::INT);
 	_setting(SETTING_MAX_REPAIRS, 3, Variant::INT);
 	_setting(SETTING_AUTO_PLAYTEST, true, Variant::BOOL);
 	_setting(SETTING_AUTO_ROLLBACK, true, Variant::BOOL);
@@ -172,6 +172,7 @@ Dictionary AIOSPlugin::_read_model_settings() const {
 	settings["show_thinking"] = (bool)ps->get_setting(SETTING_SHOW_THINKING, true);
 	settings["effort"] = AIOS_EFFORT_NAMES[effort_index];
 	settings["max_tokens"] = (int)(int64_t)ps->get_setting(SETTING_MAX_TOKENS, 16384);
+	settings["max_turns"] = (int)(int64_t)ps->get_setting(SETTING_MAX_TURNS, 48);
 	return settings;
 }
 
@@ -196,6 +197,7 @@ void AIOSPlugin::_write_model_settings(const Dictionary &p_settings) {
 		}
 	}
 	ps->set_setting(SETTING_MAX_TOKENS, (int)(int64_t)p_settings.get("max_tokens", 16384));
+	ps->set_setting(SETTING_MAX_TURNS, (int)(int64_t)p_settings.get("max_turns", 48));
 
 	// Persist immediately. Losing an API-key-adjacent configuration because the
 	// editor was closed the wrong way is a bad first impression.
@@ -208,7 +210,7 @@ void AIOSPlugin::_apply_model_settings() {
 
 	if (llm != nullptr) {
 		llm->set_config(settings);
-		llm->set_max_turns((int)(int64_t)ps->get_setting(SETTING_MAX_TURNS, 24));
+		llm->set_max_turns((int)(int64_t)ps->get_setting(SETTING_MAX_TURNS, 48));
 	}
 	if (pipeline.is_valid()) {
 		pipeline->set_max_repair_attempts((int)(int64_t)ps->get_setting(SETTING_MAX_REPAIRS, 3));

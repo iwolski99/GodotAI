@@ -104,6 +104,13 @@ bool AIOSToolRegistry::is_mutating(const String &p_tool) {
 	return false;
 }
 
+bool AIOSToolRegistry::is_scene_edit(const String &p_tool) {
+	return p_tool == "create_node_safe" || p_tool == "attach_script_safe" || p_tool == "safe_delete_node" ||
+			p_tool == "set_node_properties" || p_tool == "reparent_node" || p_tool == "connect_signal_safe" ||
+			p_tool == "disconnect_signal_safe" || p_tool == "create_scene" || p_tool == "patch_script" ||
+			p_tool == "save_scene";
+}
+
 bool AIOSToolRegistry::is_clarify_phase_tool(const String &p_tool) {
 	return p_tool == "ask_user" || p_tool == "commit_brief" || p_tool == "propose_plan" ||
 			p_tool == "get_world_model" || p_tool == "list_tools" || p_tool == "ping" ||

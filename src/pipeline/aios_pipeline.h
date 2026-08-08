@@ -106,8 +106,9 @@ private:
 	Dictionary pending_plan;
 	String propose_plan_tool_use_id;
 
-	// Tracks whether the current tool batch changed the project (for auto_playtest).
-	bool batch_had_mutations = false;
+	// Tracks whether the current tool batch saved the scene (for auto_playtest).
+	bool batch_saved_scene = false;
+	bool batch_had_scene_edits = false;
 
 	Ref<AIOSAgentMemory> memory;
 

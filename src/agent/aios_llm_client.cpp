@@ -125,8 +125,8 @@ Error AIOSLlmClient::send_tool_results(const Array &p_results) {
 		details["max_turns"] = max_turns;
 		_fail(AIOSJson::error("turn_limit_reached",
 				"The agent used " + String::num_int64(turn_count) + " tool turns without finishing, which is the "
-				"configured ceiling. Stopping so it cannot loop indefinitely. Raise the limit in the dock's "
-				"Settings if the task genuinely needs more steps.",
+				"configured ceiling. Stopping so it cannot loop indefinitely. Raise Max tool turns in the "
+				"dock's Settings if the task genuinely needs more steps.",
 				details));
 		return ERR_BUSY;
 	}
