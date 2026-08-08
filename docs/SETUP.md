@@ -190,9 +190,8 @@ a model, which means an API key.
 *(This is optional. If you would rather drive the plugin from your own harness
 over the bridge, skip to step 6 — that path needs no key at all.)*
 
-Open the **AI Agent** dock and press **Settings**:
-
-![The dock's settings panel: provider, API key, model selector, thinking toggle, reasoning effort and token budget](images/dock-settings.png)
+Open the **AI Agent** dock and press **Settings**. It opens as a dialog rather
+than a panel inside the dock, so it costs the chat history no space:
 
 | Field | What to put in it |
 | --- | --- |
@@ -245,6 +244,26 @@ broken.
 > committed, pushed, and scraped. This is a plugin for public repositories, so
 > that is a matter of when, not if.
 
+### Asset generation (optional)
+
+The same Settings panel stores keys for the asset services. They are entirely
+optional — everything except `generate_3d_asset` works without them.
+
+| Provider | Environment variable | What it does |
+| --- | --- | --- |
+| Meshy | `MESHY_API_KEY` | Text/image to 3D |
+| Tripo3D | `TRIPO_API_KEY` | Text/image to 3D |
+| ElevenLabs | `ELEVENLABS_API_KEY` | Voice and SFX *(no tool yet)* |
+| OpenAI | `OPENAI_API_KEY` | Images and audio *(no tool yet)* |
+
+For the mesh cleanup pass, install [Blender](https://www.blender.org/) 4.x. The
+plugin finds it on `PATH`, from `GODOT_AI_OS_BLENDER`, or from Godot's own
+**Filesystem → Import → Blender → Blender Path** setting if you have already set
+that for `.blend` import.
+
+Full details, including what generation costs and how the per-session ceiling
+works: **[ASSETS.md](ASSETS.md)**.
+
 ### Agent behaviour settings
 
 **Project → Project Settings → AI Agent OS → agent**:
@@ -255,6 +274,14 @@ broken.
 | `max_repair_attempts` | 3 | Consecutive failures before the pipeline rolls back and stops. |
 | `auto_playtest` | on | Allow the pipeline to run the game as part of its loop. |
 | `auto_rollback` | on | `git reset --hard` to the step snapshot when the repair budget is spent. |
+
+**Project Settings → AI Agent OS → assets**:
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `max_paid_calls` | 10 | Paid generation calls allowed per session. `-1` for no limit. |
+| `target_directory` | `res://assets/generated` | Where generated assets land. |
+| `default_provider` | Meshy | Used when a call does not name one. |
 
 ---
 

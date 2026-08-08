@@ -22,17 +22,19 @@ No wondering what it just did to your project.
     └─ your model, or ours
 ```
 
-> **Status: Milestone 2 of 3 — shipped and working.** The pipeline, transactional
-> git rollback, playtest error interception, pre-execution validation and the
-> built-in Anthropic/OpenRouter agent are complete and tested end to end against
-> Godot 4.4.1 on Linux. Windows code paths are written but not yet verified on a
-> Windows machine. See the [roadmap](docs/ROADMAP.md) for what's next.
+> **Status: all three milestones shipped.** Tools, the autonomous pipeline with
+> git rollback and playtest error interception, the editing and spatial tools,
+> viewport vision, and the generated-asset gateway are complete and tested
+> against Godot 4.4.1 on Linux. Two things are written but unverified: the
+> **Windows** build paths and the **Blender** post-processing script (neither
+> Windows nor Blender exists in the development environment). See the
+> [roadmap](docs/ROADMAP.md).
 
-![The AI Agent dock in the Godot editor, showing an agent creating a node, attaching a script, and being refused a delete](docs/images/dock.png)
+![The AI Agent dock docked on the right of the Godot editor, showing the pipeline state header, the log, the prompt box and the action bar](docs/images/dock.png)
 
-*An agent building a scene through the bridge. Green is a successful tool call
-with its git checkpoint; red is a rejected one, with the reason. The `Player`
-node on the left was created by the agent, not by hand.*
+*The dock: a pipeline state header, a log of every tool call and its result, a
+prompt box, and the buttons that matter — Execute Plan, Stop, Rollback. Settings
+open in a dialog so they never eat the history.*
 
 ---
 
@@ -49,6 +51,48 @@ This plugin closes that hole. It gives the agent a real interface to the editor 
 one that answers questions honestly, rejects malformed changes with an
 explanation, and records a git checkpoint after every mutation so any of it can
 be walked back with one button.
+
+---
+
+## What's in Milestone 3
+
+**It can edit, not just add.** `set_node_properties` moves and configures what
+already exists. `create_scene` makes reusable prefabs. `connect_signal_safe`
+wires `body_entered` to `take_damage` — with `CONNECT_PERSIST`, so the connection
+is written into the `.tscn` instead of vanishing on the next scene load.
+`patch_script` replaces one function instead of rewriting a 300-line file from
+memory, and refuses to write a patch that doesn't compile.
+
+**It knows where things are.** The world model carries world-space position,
+rotation in degrees, scale and AABB bounds. Before this, an agent placing a wall
+next to another wall was guessing: `position` in a property dump is a *local*
+offset and is omitted entirely when it matches the default.
+
+**It can see.** `capture_viewport_screenshot` hands the model the actual frame.
+
+```
+run_playtest        →  "did it error?"
+capture_viewport    →  "does it look right?"
+```
+
+Those are different questions. An unlit level, a rifle at 40× scale, a player
+spawned inside the floor — none of them produce a single line of diagnostic
+output.
+
+**It can get assets.** Text-to-3D through Meshy or Tripo3D, downloaded and
+imported. Or `import_asset_from_url` for any service this plugin has never heard
+of. Keys live in the encrypted store, never in `project.godot`.
+
+**And clean them up.** Generated meshes arrive at arbitrary scale, Z-up, 200k
+triangles, no collision. `cleanup_mesh` runs them through headless Blender:
+decimate to a triangle budget, normalise scale to metres, weld seam vertices,
+drop the origin to the footprint. Collision uses Godot's own import-time
+mechanism — the mesh is duplicated, decimated hard, and renamed `-convcol` so
+the engine builds the body itself.
+
+**Paid calls are gated.** `generate_3d_asset` costs real money, and a repair loop
+would happily call it five times because the call *succeeds* every time. A
+per-session ceiling and a dock warning on every billed call.
 
 ---
 
@@ -96,8 +140,6 @@ selector fetched live from the provider, thinking on/off, reasoning effort from
 `low` to `max`, output token budget. API keys are stored encrypted in `user://`,
 never under `res://`, and an environment variable takes priority and is never
 written anywhere.
-
-![The dock's settings panel: provider, API key with its status line, model selector, thinking toggles, reasoning effort and token budget](docs/images/dock-settings.png)
 
 The bridge is unchanged and still first-class: both agents reach the project
 through the same tool registry and get the same manifest.
@@ -201,6 +243,7 @@ event loop: **[docs/AGENTS.md](docs/AGENTS.md)**.
 | **[Architecture](docs/ARCHITECTURE.md)** | How it works and why it's built this way. |
 | **[Connecting agents](docs/AGENTS.md)** | Harness integration, Claude example, system prompt. |
 | **[Pipeline](docs/PIPELINE.md)** | The agent loop: diagrams, pseudocode, error interception, prompt wrappers. |
+| **[Assets](docs/ASSETS.md)** | Generation, the Blender cleanup pass, collision, and what it costs. |
 | **[Roadmap](docs/ROADMAP.md)** | Milestone 3, what shipped, and what's deliberately out of scope. |
 | **[Tool schemas](project/addons/godot_ai_os/schemas/)** | The authoritative tool contracts. |
 
@@ -215,6 +258,10 @@ event loop: **[docs/AGENTS.md](docs/AGENTS.md)**.
 Optional, for the built-in agent: an [Anthropic](https://console.anthropic.com/)
 or [OpenRouter](https://openrouter.ai/) API key. Driving the plugin from your own
 harness over the bridge needs no key.
+
+Optional, for generated assets: a [Meshy](https://www.meshy.ai/) or
+[Tripo3D](https://www.tripo3d.ai/) key, and [Blender](https://www.blender.org/)
+4.x on `PATH` for the mesh cleanup pass. Everything else works without them.
 
 Linux, macOS and Windows are all supported by the build. Milestones 1 and 2 have
 been tested end to end on Linux against Godot 4.4.1. The Windows code paths —

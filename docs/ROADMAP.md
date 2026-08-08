@@ -1,7 +1,7 @@
 # Roadmap
 
-Three milestones are planned. This is a living document — scope will move as the
-thing gets used.
+All three planned milestones have shipped. This is a living document — scope
+moved as the thing got used, and the record of where it moved is at the bottom.
 
 ---
 
@@ -97,18 +97,120 @@ whether they work. Full write-up: **[docs/PIPELINE.md](PIPELINE.md)**.
 
 ---
 
-## Milestone 3 — Multi-agent orchestration and polish
+## Milestone 3 — Editing, sight, and generated assets ✅ *shipped*
 
-Making it something other people can rely on.
+Milestone 1 let an agent read and add. Milestone 2 made it accountable for
+whether its changes worked. Milestone 3 lets it **edit** what already exists,
+**see** what it built, and **acquire** the assets it needs.
 
+**Editing tools** — the actual blocker on "build me a game"
+- [x] `set_node_properties` — move, rotate, scale, retint, set exported vars
+- [x] `create_scene` — reusable prefabs exist at all
+- [x] `reparent_node` — restructure, or reorder for draw/layout order
+- [x] `connect_signal_safe` / `disconnect_signal_safe` — gameplay wiring
+- [x] `read_script` with a function index
+- [x] `patch_script` — replace one function instead of rewriting the file
+- [x] Spatial awareness in the world model: world-space position, rotation in
+      degrees, scale, and transformed AABB bounds
+
+**Sight**
+- [x] `capture_viewport_screenshot` — the editor viewport as a PNG
+- [x] Image content blocks in both providers, including the workaround for
+      OpenAI's refusal to carry images inside a tool result
+
+**Generated assets**
+- [x] Meshy and Tripo3D text-to-3D, downloaded and imported
+- [x] `import_asset_from_url` — works with any service, including ones this
+      plugin has never heard of
+- [x] Asset keys in the encrypted credential store, never in `project.godot`
+- [x] Per-session paid-call ceiling, and a dock warning on every paid call
+
+**Blender**
+- [x] Headless bridge with cross-platform discovery
+- [x] `cleanup_mesh` — decimate to a triangle budget, normalise scale, weld
+      seams, drop the origin to the footprint
+- [x] Collision via Godot's own import-time mesh-name suffixes
+- [x] `run_blender_script` for procedural geometry
+- [ ] **Not verified end to end** — Blender is not installed in the development
+      environment. The script is syntax- and argument-tested only.
+
+**UI**
+- [x] Settings moved out of the dock into a dialog
+
+---
+
+## How the three milestones interlock
+
+Each milestone is useless without the one before it, which is worth making
+explicit because the dependency is not the obvious one.
+
+```
+  M1  TOOLS            read the project, change it, undo the change
+       │               get_world_model / create_node_safe / attach_script_safe
+       │               safe_delete_node + git checkpoints + the IPC bridge
+       │
+       │  ── without M1, an agent is guessing at your scene tree ──
+       ▼
+  M2  ACCOUNTABILITY   was the change correct?
+       │               Validate before executing. Run the game. Read the stack
+       │               trace. Repair, or reset --hard to the snapshot taken
+       │               before the step.
+       │
+       │  ── without M2, M1's tools let an agent break things faster ──
+       ▼
+  M3  REACH            edit what exists, see what you built, get what you need
+                       set_node_properties / connect_signal_safe / patch_script
+                       capture_viewport_screenshot
+                       generate_3d_asset -> cleanup_mesh
+```
+
+The loop a real session runs through touches all three:
+
+| Step | Milestone | Tool |
+| --- | --- | --- |
+| "Build a corridor with a locked door" | — | the prompt |
+| Read the scene | M1 | `get_world_model` (now with transforms, M3) |
+| Snapshot before touching anything | M2 | `AIOSGitCheckpoint::create_snapshot` |
+| Check the plan before running it | M2 | `validate_change` |
+| Make the prefab | M3 | `create_scene` |
+| Build it | M1 | `create_node_safe` |
+| Place it in the world | M3 | `set_node_properties` |
+| Get a door model | M3 | `generate_3d_asset` → `cleanup_mesh` |
+| Wire the lock | M3 | `connect_signal_safe` |
+| Fix one function of the script | M3 | `patch_script` |
+| Check it still holds together | M2 | `validate_scene` |
+| Run it | M2 | `run_playtest` |
+| Look at it | M3 | `capture_viewport_screenshot` |
+| Fix what broke, or roll back | M2 | the repair budget |
+| Commit the working state | M1 | `create_checkpoint` |
+
+Read bottom-up, the design rule is: **M3 tools are only safe because M2 gates
+them, and M2 can only gate them because M1 made the project legible.**
+
+---
+
+## Milestone 4 — the ideas that did not fit
+
+Not scheduled. Listed because they came up while building M3 and are the
+obvious next things.
+
+**Making long sessions work**
+- Plan review: the agent proposes a sequence, the human approves it in the
+  dock, and only then does it execute
+- Diff preview before a batch of mutations lands
+- Per-project agent memory: what was tried, what broke, the conventions
 - Agent roles with distinct tool permissions (an Architect that cannot write
   files; a Debugger that cannot delete)
-- Plan review: the agent proposes a sequence, the human approves it in the dock,
-  and only then does it execute
-- Diff preview in the dock before a batch of mutations lands
+
+**Assets**
+- Textures and audio through the same gateway (ElevenLabs and OpenAI keys are
+  already in the credential store; the download path is already generic)
+- A material pass — generated meshes arrive with flat albedo and no roughness
+- LOD generation, which is the same Blender decimate at three budgets
+- Animation retargeting
+
+**Reach**
 - MCP server so any MCP-capable client connects with no adapter code
-- Asset pipeline tools — import, texture and audio handling
-- Per-project agent memory: what was tried, what broke, what the conventions are
 - Prebuilt binaries on GitHub Releases for Linux, macOS and Windows
 - CI: build matrix, headless integration tests against a real editor
 

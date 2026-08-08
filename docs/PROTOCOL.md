@@ -140,6 +140,9 @@ never acknowledged.
 | `status` | `{state, detail}` | The built-in agent's pipeline changed stage. Only sent when the in-editor agent is driving. |
 | `agent_message` | `{text}` | The built-in agent said something. |
 | `run_finished` | `{ok, message, steps_executed, filesystem_changed}` | A built-in-agent run ended. |
+| `asset_stage` | `{stage, detail}` | An asset job moved between REQUESTING / POLLING / DOWNLOADING / IMPORTING. |
+| `asset_ready` | the import result | A `generate_3d_asset` or `import_asset_from_url` finished. **This is how you get the path** — the tool call only acknowledges the launch. |
+| `asset_failed` | `{code, message, provider, task_id}` | An asset job failed. |
 
 ### Agent → editor
 
@@ -201,6 +204,11 @@ happened yet. The response acknowledges the launch:
 ```
 
 While it runs, `runtime_log` events stream the console output line by line.
+
+`generate_3d_asset` and `import_asset_from_url` follow the same pattern for the
+same reason — generation takes 30-120 seconds, so the response acknowledges the
+job and the finished `res://` path arrives as an `asset_ready` event. Progress
+arrives as `asset_stage` events in between.
 
 Save the scene before you playtest. The child process reads the project from
 disk, not from the editor's unsaved state, so an unsaved edit is invisible to it.

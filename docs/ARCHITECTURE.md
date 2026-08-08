@@ -248,6 +248,68 @@ near-passthrough and OpenRouter requests are translated on the way out and back.
 
 ---
 
+## Milestone 3: editing, sight and assets
+
+Milestone 2 could build a scene and tell you whether it ran. It could not
+*change* one: an agent could create a node and never move it, attach a whole
+script but never edit one, and had no idea where anything was in space. That
+gap — not asset generation — was what actually blocked building a game.
+
+**Editing is a superset of creating, and it needs different guarantees.**
+`set_node_properties` shares its coercion path with `create_node_safe` because
+two implementations disagreeing about whether `[64, 32]` is a `Vector2` would be
+a maddening bug. It reads every value back after writing, because a Godot setter
+can clamp or ignore what you gave it and reporting "applied" for a rejected value
+sends the agent hunting in the wrong place.
+
+`connect_signal_safe` uses `CONNECT_PERSIST`. Without that flag the connection
+works until the scene reloads and then silently disappears — the kind of bug that
+looks correct in the editor right up until it isn't.
+
+`patch_script` exists because `attach_script_safe` rewrites the whole file from
+whatever the model remembered. That is fine at 20 lines and destructive at 300.
+Patches are compiled in memory before anything is written, so a patch that would
+not parse leaves the file untouched.
+
+**Spatial awareness is what makes 3D possible at all.** The property dump reports
+`position` as a *local* offset and omits it entirely when it equals the default,
+so an agent placing walls was working blind. The world model now carries
+world-space position, rotation in degrees (radians are a reliable source of
+silent factor-of-57 bugs), scale, and transformed AABB bounds — which is what
+makes "does this overlap that" answerable.
+
+**Sight closes the loop text leaves open.** `run_playtest` reports whether the
+game *errored*. It cannot report that the level is unlit, the rifle is 40 metres
+long, or the player spawned inside the floor — failures that produce no
+diagnostic whatsoever. `capture_viewport_screenshot` hands the model the frame.
+
+That required provider work: Anthropic accepts an image inside a `tool_result`,
+and the OpenAI chat-completions schema rejects images there outright. So
+OpenRouter requests keep the text in the `tool` message and re-send the image as
+a following `user` message — the workaround that ecosystem settled on.
+
+**Assets: the generation is the easy half.** Every service hands back a URL. The
+part that fails quietly is everything after: a `.glb` written into `res://` is
+invisible to the editor until `update_file` + `scan` runs the importer, and a
+mesh arrives at arbitrary scale with no collision and 200k triangles.
+
+Collision uses Godot's own supported mechanism rather than post-hoc scene
+surgery: the importer builds a collision body from *mesh name suffixes*
+(`-col`, `-convcol`, `-colonly`), so the Blender pass duplicates the mesh,
+decimates the copy hard, and renames it. The engine does the rest.
+
+Blender's role is deliberately narrow. An LLM writing `bpy` produces decent
+parametric geometry and poor organic geometry, so procedural generation is
+available but the valuable path is post-processing what a generation service
+returned.
+
+**Paid calls get their own gate.** `generate_3d_asset` costs money at a real
+provider, and nothing else in the pipeline would stop a repair loop from calling
+it repeatedly — the call *succeeds* every time, so there is no error to back off
+from. Hence a per-session ceiling and a dock warning on every billed call.
+
+---
+
 ## File map
 
 | Path | What lives there |
@@ -263,7 +325,11 @@ near-passthrough and OpenRouter requests are translated on the way out and back.
 | `src/pipeline/aios_pipeline.*` | The loop itself, and the prompt-wrapper builders that feed failures back to the model. |
 | `src/agent/aios_provider.*` | Request building and response normalisation for Anthropic and OpenRouter. |
 | `src/agent/aios_llm_client.*` | Async HTTP transport, conversation history, model listing. |
-| `src/agent/aios_credentials.*` | Encrypted API key store in `user://`; environment variables take priority. |
+| `src/agent/aios_credentials.*` | Encrypted API key store in `user://` for both model and asset providers; environment variables take priority. |
+| `src/vision/aios_vision.*` | Editor viewport capture, downscaling and PNG encoding for multimodal feedback. |
+| `src/assets/aios_asset_pipeline.*` | Text-to-3D generation, download, and getting the result imported. |
+| `src/assets/aios_blender_bridge.*` | Headless Blender invocation: mesh cleanup and arbitrary bpy scripts. |
+| `tools/blender/` | The Blender-side Python pipeline (also shipped inside the addon). |
 | `src/editor/aios_plugin.*` | `EditorPlugin`; owns everything; message routing; project settings; session file. |
 | `src/editor/aios_chat_dock.*` | The dock UI. |
 | `src/util/aios_json.*` | Variant ⇄ JSON marshalling and type coercion. |
