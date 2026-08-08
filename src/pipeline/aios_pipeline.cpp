@@ -8,6 +8,7 @@
 #include "../validate/aios_validator.h"
 
 #include <godot_cpp/classes/json.hpp>
+#include <godot_cpp/classes/time.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
@@ -424,7 +425,10 @@ void AIOSPipeline::_prepare_run_state(const String &p_goal, const String &p_mode
 		}
 
 		// A handoff into coder mode means the human wants implementation now.
-		if (mode.to_lower() == "coder" && !pending_plan.is_empty()) {
+		if (mode.to_lower() == "coder") {
+			awaiting_plan_approval = false;
+			plan_approved = true;
+		} else if (!pending_plan.is_empty()) {
 			awaiting_plan_approval = false;
 			plan_approved = true;
 		}
@@ -921,6 +925,7 @@ void AIOSPipeline::stop() {
 	pending_results.clear();
 	deferred_calls.clear();
 	propose_plan_tool_use_id = String();
+	awaiting_plan_approval = false;
 
 	// Preserve brief/plan artifacts so a mode switch or follow-up prompt can
 	// continue the same session without re-interviewing.
@@ -1057,13 +1062,27 @@ void AIOSPipeline::_handle_tool_calls(const Array &p_calls) {
 	batch_saved_scene = false;
 	batch_had_scene_edits = false;
 
+	Array calls = p_calls;
+	Dictionary used_ids;
+	for (int i = 0; i < calls.size(); i++) {
+		Dictionary call = calls[i];
+		String id = String(call.get("id", "")).strip_edges();
+		if (id.is_empty() || used_ids.has(id)) {
+			id = "call_" + String::num_int64(i) + "_" +
+					String::num_uint64((uint64_t)Time::get_singleton()->get_ticks_usec() & 0xfffff);
+		}
+		used_ids[id] = true;
+		call["id"] = id;
+		calls[i] = call;
+	}
+
 	// One snapshot per batch, not per call. A model routinely emits several
 	// calls that only make sense together (create a node, then attach its
 	// script); rolling back to the middle of that would leave a half-built
 	// scene that is worse than either end state.
 	bool may_mutate = false;
-	for (int i = 0; i < p_calls.size(); i++) {
-		Dictionary call = p_calls[i];
+	for (int i = 0; i < calls.size(); i++) {
+		Dictionary call = calls[i];
 		if (AIOSToolRegistry::is_mutating(String(call.get("name", "")))) {
 			may_mutate = true;
 			break;
@@ -1081,8 +1100,8 @@ void AIOSPipeline::_handle_tool_calls(const Array &p_calls) {
 		}
 	}
 
-	for (int i = 0; i < p_calls.size(); i++) {
-		Dictionary call = p_calls[i];
+	for (int i = 0; i < calls.size(); i++) {
+		Dictionary call = calls[i];
 		const String tool = String(call.get("name", ""));
 
 		if (require_plan_approval && !plan_approved && AIOSToolRegistry::is_mutating(tool) && tool != "save_scene") {
@@ -1098,7 +1117,7 @@ void AIOSPipeline::_handle_tool_calls(const Array &p_calls) {
 			continue;
 		}
 
-		if (awaiting_playtest || awaiting_user || awaiting_plan_approval) {
+		if (awaiting_playtest || awaiting_user) {
 			// Everything after a playtest or an ask_user call waits for the
 			// human/runtime to finish — continuing would change the world under
 			// an answer that has not arrived yet.
@@ -1108,7 +1127,7 @@ void AIOSPipeline::_handle_tool_calls(const Array &p_calls) {
 		_execute_call(call);
 	}
 
-	if (!awaiting_playtest && !awaiting_user && !awaiting_plan_approval) {
+	if (!awaiting_playtest && !awaiting_user) {
 		_finish_turn();
 	}
 }
@@ -1322,7 +1341,11 @@ void AIOSPipeline::_execute_call(const Dictionary &p_call) {
 void AIOSPipeline::_push_result(const String &p_id, const Dictionary &p_payload, bool p_is_error) {
 	Dictionary block;
 	block["type"] = "tool_result";
-	block["tool_use_id"] = p_id;
+	String id = p_id.strip_edges();
+	if (id.is_empty()) {
+		id = "call_" + String::num_uint64((uint64_t)Time::get_singleton()->get_ticks_usec() & 0xfffff);
+	}
+	block["tool_use_id"] = id;
 
 	// A screenshot has to reach the model as an actual image block, not as a
 	// base64 string buried in JSON — a model handed 400 KB of base64 text will

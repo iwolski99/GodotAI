@@ -7,6 +7,7 @@
 #include "../util/aios_json.h"
 
 #include <godot_cpp/classes/json.hpp>
+#include <godot_cpp/classes/time.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #define ANTHROPIC_VERSION "2023-06-01"
@@ -392,6 +393,25 @@ Dictionary AIOSProvider::tool_result_message(const Array &p_results) {
 	return msg;
 }
 
+static String ensure_unique_tool_id(const String &p_id, int p_index, Dictionary &r_used) {
+	String id = p_id.strip_edges();
+	if (id.is_empty() || r_used.has(id)) {
+		id = "call_" + String::num_int64(p_index) + "_" +
+				String::num_uint64((uint64_t)Time::get_singleton()->get_ticks_usec() & 0xfffff);
+	}
+	r_used[id] = true;
+	return id;
+}
+
+static void normalize_tool_call_ids(Array &r_calls) {
+	Dictionary used;
+	for (int i = 0; i < r_calls.size(); i++) {
+		Dictionary call = r_calls[i];
+		call["id"] = ensure_unique_tool_id(String(call.get("id", "")), i, used);
+		r_calls[i] = call;
+	}
+}
+
 /* -------------------------------------------------------------------------- */
 /*  Response parsing                                                           */
 /* -------------------------------------------------------------------------- */
@@ -448,6 +468,20 @@ static Dictionary parse_anthropic(const Dictionary &p_body) {
 		}
 	}
 
+	normalize_tool_call_ids(tool_calls);
+	int call_idx = 0;
+	for (int i = 0; i < content.size(); i++) {
+		if (Variant(content[i]).get_type() != Variant::DICTIONARY) {
+			continue;
+		}
+		Dictionary block = content[i];
+		if (String(block.get("type", "")) == "tool_use" && call_idx < tool_calls.size()) {
+			block["id"] = Dictionary(tool_calls[call_idx])["id"];
+			content[i] = block;
+			call_idx++;
+		}
+	}
+
 	out["text"] = text;
 	out["thinking"] = thinking;
 	out["tool_calls"] = tool_calls;
@@ -500,6 +534,8 @@ static Dictionary parse_openrouter(const Dictionary &p_body) {
 		}
 		tool_calls.push_back(call);
 	}
+
+	normalize_tool_call_ids(tool_calls);
 
 	out["text"] = text;
 	out["thinking"] = thinking;
