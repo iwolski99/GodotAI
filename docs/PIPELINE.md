@@ -299,10 +299,10 @@ on_playtest_finished(report):
 
     if failed:
         repair_attempts += 1
-        if repair_attempts >= max_repair_attempts and auto_rollback:
-            git.reset_to_snapshot(step_snapshot)
-            push build_rollback_notice(...)
-            abort("repair_budget_exhausted")
+        if repair_attempts >= max_repair_attempts:
+            if auto_rollback:
+                git.reset_to_snapshot(step_snapshot)
+            abort("repair_budget_exhausted")       # always; never continue the loop
             return
 
     drain deferred_calls through execute_call()

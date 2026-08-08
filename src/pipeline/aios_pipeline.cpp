@@ -288,11 +288,21 @@ Dictionary AIOSPipeline::_minimal_brief_from_goal(const String &p_goal) {
 			"Defaulting to 2D because the interview was skipped. Switch to 3D node types only if the "
 			"original request clearly requires 3D.";
 	const String lower = p_goal.to_lower();
-	if (lower.contains("3d") || lower.contains("first person") || lower.contains("first-person") ||
-			lower.contains("fps") || lower.contains("third person") || lower.contains("third-person")) {
+	const bool explicit_2d = lower.contains("2d") || lower.contains("top-down") || lower.contains("top down") ||
+			lower.contains("side-scroll") || lower.contains("side scroll") || lower.contains("platformer");
+	const bool explicit_3d = lower.contains("3d") || lower.contains("first person") ||
+			lower.contains("first-person") || lower.contains("third person") || lower.contains("third-person");
+	// Bare "fps" often means a shooter genre, not necessarily 3D — only treat it
+	// as 3D when the goal does not also ask for a 2D presentation.
+	const bool fps_like = lower.contains("fps") || lower.contains("first person shooter") ||
+			lower.contains("first-person shooter");
+	if ((explicit_3d || (fps_like && !explicit_2d)) && !explicit_2d) {
 		brief["dimensions"] = "3d";
 		brief["technical_notes"] =
 				"Using 3D node types (Node3D / CharacterBody3D / Camera3D) because the request implies a 3D game.";
+	} else if (fps_like && explicit_2d) {
+		brief["technical_notes"] =
+				"Treating this as a 2D shooter (Node2D / CharacterBody2D) because the request asks for 2D.";
 	}
 	return brief;
 }
@@ -592,12 +602,9 @@ void AIOSPipeline::stop() {
 	if (stage == STAGE_IDLE) {
 		return;
 	}
-	if (llm != nullptr) {
-		llm->cancel();
-	}
-	if (playtest.is_valid() && playtest->is_running()) {
-		playtest->stop();
-	}
+	// Drop ownership before killing the playtest: AIOSPlaytest::stop() emits
+	// playtest_finished synchronously, and if awaiting_playtest were still
+	// true the handler would restart a model turn after the human pressed Stop.
 	awaiting_playtest = false;
 	awaiting_user = false;
 	ask_user_tool_use_id = String();
@@ -606,6 +613,13 @@ void AIOSPipeline::stop() {
 	deferred_calls.clear();
 	clarifying = false;
 	brief_ready = false;
+
+	if (llm != nullptr) {
+		llm->cancel();
+	}
+	if (playtest.is_valid() && playtest->is_running()) {
+		playtest->stop();
+	}
 	_set_stage(STAGE_IDLE, "stopped by user");
 	emit_signal("pipeline_log", "warn",
 			"Run stopped. The project was left exactly as it is - nothing was rolled back. "
@@ -937,20 +951,31 @@ void AIOSPipeline::_finish_turn() {
 		}
 
 		const bool budget_spent = repair_attempts >= max_repair_attempts;
-		if (budget_spent && auto_rollback && !step_snapshot.is_empty() && git.is_valid()) {
-			Dictionary reset = git->reset_to_snapshot(step_snapshot);
-			if ((bool)reset["ok"]) {
-				emit_signal("pipeline_log", "warn",
-						"Repair budget spent after " + String::num_int64(repair_attempts) +
-								" attempts. Reset to snapshot " + step_snapshot.substr(0, 8) + ".");
-				_abort("repair_budget_exhausted",
-						"The agent could not produce a working scene in " + String::num_int64(max_repair_attempts) +
-								" attempts, so the project was rolled back to where it was before this step. "
-								"The findings are in the log above - this is a good moment to look at them yourself.");
-				return;
+		if (budget_spent) {
+			// Always stop when the budget is spent. auto_rollback only chooses
+			// whether to leave the wreckage on disk for inspection.
+			if (auto_rollback && !step_snapshot.is_empty() && git.is_valid()) {
+				Dictionary reset = git->reset_to_snapshot(step_snapshot);
+				if ((bool)reset["ok"]) {
+					emit_signal("pipeline_log", "warn",
+							"Repair budget spent after " + String::num_int64(repair_attempts) +
+									" attempts. Reset to snapshot " + step_snapshot.substr(0, 8) + ".");
+					_abort("repair_budget_exhausted",
+							"The agent could not produce a working scene in " +
+									String::num_int64(max_repair_attempts) +
+									" attempts, so the project was rolled back to where it was before this step. "
+									"The findings are in the log above - this is a good moment to look at them yourself.");
+					return;
+				}
+				emit_signal("pipeline_log", "error",
+						"Rollback failed: " + String(Dictionary(reset["error"])["message"]));
 			}
-			emit_signal("pipeline_log", "error",
-					"Rollback failed: " + String(Dictionary(reset["error"])["message"]));
+			_abort("repair_budget_exhausted",
+					"The agent could not produce a working scene in " + String::num_int64(max_repair_attempts) +
+							" attempts. Rollback is off (or failed), so the broken state was left on disk for "
+							"inspection. last_good_snapshot=" +
+							last_good_snapshot.substr(0, 8) + ".");
+			return;
 		}
 
 		// Still inside budget: feed the findings back and let the model fix it.
@@ -1025,18 +1050,30 @@ void AIOSPipeline::_on_playtest_finished(const Dictionary &p_report) {
 
 	if (failed) {
 		repair_attempts++;
-		if (repair_attempts >= max_repair_attempts && auto_rollback && !step_snapshot.is_empty() && git.is_valid()) {
-			Dictionary reset = git->reset_to_snapshot(step_snapshot);
-			if ((bool)reset["ok"]) {
-				_set_stage(STAGE_REPAIRING, "rolled back after repeated playtest failures");
-				Dictionary notice;
-				notice["type"] = "text";
-				notice["text"] = build_rollback_notice(
-						"the playtest failed " + String::num_int64(repair_attempts) + " times in a row",
-						step_snapshot);
-				pending_results.push_back(notice);
-				repair_attempts = 0;
+		if (repair_attempts >= max_repair_attempts) {
+			// Mirror the scene-sweep path: budget spent always aborts. The old
+			// code reset repair_attempts and continued, which let a confused
+			// model burn turns forever after a "rollback performed" notice.
+			if (auto_rollback && !step_snapshot.is_empty() && git.is_valid()) {
+				Dictionary reset = git->reset_to_snapshot(step_snapshot);
+				if ((bool)reset["ok"]) {
+					_set_stage(STAGE_REPAIRING, "rolled back after repeated playtest failures");
+					emit_signal("pipeline_log", "warn",
+							"Repair budget spent after " + String::num_int64(repair_attempts) +
+									" playtest failures. Reset to snapshot " + step_snapshot.substr(0, 8) + ".");
+					_abort("repair_budget_exhausted",
+							"The playtest failed " + String::num_int64(max_repair_attempts) +
+									" times in a row, so the project was rolled back to where it was before this "
+									"step. The diagnostics are in the log above.");
+					return;
+				}
+				emit_signal("pipeline_log", "error",
+						"Rollback failed: " + String(Dictionary(reset["error"])["message"]));
 			}
+			_abort("repair_budget_exhausted",
+					"The playtest failed " + String::num_int64(max_repair_attempts) +
+							" times in a row. Rollback is off (or failed), so the broken state was left on disk.");
+			return;
 		}
 	}
 

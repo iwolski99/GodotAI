@@ -151,7 +151,7 @@ none of them is a black box to the human watching it.
 | `chat` | `{text}` | Renders as an agent message. Fenced code blocks and `` `inline code` `` are formatted. |
 | `thinking` | `{text}` | Renders as dimmed italic reasoning. |
 | `log` | `{level, text}` | A log line. `level` is `info` / `warn` / `error` / `success`. |
-| `status` | `{state, detail}` | Sets the pipeline indicator. `state` is `IDLE`, `PLANNING`, `VALIDATING`, `EXECUTING`, `PLAYTESTING`, `REPAIRING` or `ERROR`. |
+| `status` | `{state, detail}` | Sets the pipeline indicator. `state` is `IDLE`, `CLARIFYING`, `PLANNING`, `VALIDATING`, `EXECUTING`, `PLAYTESTING`, `REPAIRING` or `ERROR`. |
 | `runtime_log` | `{stream, text}` | Console output from a running playtest. Sent by the runtime log bridge, not usually by agents. |
 
 Text arriving from an agent is BBCode-escaped before display, so markup in a
