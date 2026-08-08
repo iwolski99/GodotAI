@@ -397,7 +397,7 @@ void AIOSChatDock::_build_settings_panel(VBoxContainer *p_root) {
 	settings_panel->add_child(max_turns_field);
 
 	Label *build_label = memnew(Label);
-	build_label->set_text("Extension build: " + String(AIOS_GIT_COMMIT));
+	build_label->set_text("Extension build: " + String(AIOS_BUILD_LABEL));
 	build_label->add_theme_color_override("font_color", COLOR_MUTED);
 	build_label->add_theme_font_size_override("font_size", 11);
 	settings_panel->add_child(build_label);

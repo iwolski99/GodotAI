@@ -391,7 +391,7 @@ void AIOSPlugin::_enter_tree() {
 	_apply_model_settings();
 	_restore_chat_session();
 
-	dock->append_log("info", "AI Agent OS extension build " AIOS_GIT_COMMIT " loaded.");
+	dock->append_log("info", "AI Agent OS extension build " AIOS_BUILD_LABEL " loaded.");
 
 	if (llm->is_configured()) {
 		dock->append_log("info",

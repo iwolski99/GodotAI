@@ -20,12 +20,21 @@ env = SConscript("godot-cpp/SConstruct")
 
 try:
 	git_commit = subprocess.check_output(
-		["git", "rev-parse", "--short", "HEAD"], stderr=subprocess.DEVNULL, text=True
+		["git", "rev-parse", "--short=7", "HEAD"], stderr=subprocess.DEVNULL, text=True
 	).strip()
 except Exception:
 	git_commit = "unknown"
 
+try:
+	git_commit_date = subprocess.check_output(
+		["git", "show", "-s", "--format=%cs", "HEAD"], stderr=subprocess.DEVNULL, text=True
+	).strip()
+except Exception:
+	git_commit_date = ""
+
 env.Append(CCFLAGS=['-DAIOS_GIT_COMMIT=\\"%s\\"' % git_commit])
+if git_commit_date:
+	env.Append(CCFLAGS=['-DAIOS_GIT_COMMIT_DATE=\\"%s\\"' % git_commit_date])
 
 # The plugin is editor-only: every class it registers talks to EditorInterface.
 # We still build the "template" targets so users can ship a release-optimised

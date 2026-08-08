@@ -84,6 +84,17 @@ public:
 	// Builds a canonical user message carrying tool results.
 	static Dictionary tool_result_message(const Array &p_results);
 
+	// Repairs duplicate/empty tool_use and tool_result ids in stored history.
+	// OpenRouter requires each tool message's tool_call_id to match the
+	// preceding assistant tool_calls entry; corrupted sessions wedge every tool.
+	static void sanitize_conversation_history(Array &r_history);
+
+	// Returns tool_use ids from the most recent assistant turn, in order.
+	static Array last_assistant_tool_use_ids(const Array &p_history);
+
+	// Forces tool_result blocks to use the assistant ids from the current batch.
+	static Array align_tool_results(const Array &p_results, const Array &p_assistant_tool_ids);
+
 	// A canonical (Anthropic-shaped) image block. OpenRouter requests translate
 	// this into OpenAI's image_url form on the way out — and, because the OpenAI
 	// schema forbids images inside a tool result, move it to a following user

@@ -1341,17 +1341,15 @@ void AIOSPipeline::_execute_call(const Dictionary &p_call) {
 void AIOSPipeline::_push_result(const String &p_id, const Dictionary &p_payload, bool p_is_error) {
 	Dictionary block;
 	block["type"] = "tool_result";
-	String id = p_id.strip_edges();
-	if (id.is_empty()) {
-		id = "call_" + String::num_uint64((uint64_t)Time::get_singleton()->get_ticks_usec() & 0xfffff);
-	}
-	block["tool_use_id"] = id;
+	block["tool_use_id"] = p_id.strip_edges();
+
+	const Dictionary payload = p_payload.duplicate();
 
 	// A screenshot has to reach the model as an actual image block, not as a
 	// base64 string buried in JSON — a model handed 400 KB of base64 text will
 	// dutifully try to read it as text and learn nothing.
-	if (!p_is_error && p_payload.has("image_base64")) {
-		Dictionary described = p_payload.duplicate();
+	if (!p_is_error && payload.has("image_base64")) {
+		Dictionary described = payload.duplicate();
 		const String base64 = described["image_base64"];
 		const String media_type = String(described.get("media_type", "image/png"));
 		// Strip the payload out of the JSON summary so it is not sent twice.
@@ -1369,7 +1367,7 @@ void AIOSPipeline::_push_result(const String &p_id, const Dictionary &p_payload,
 		return;
 	}
 
-	block["content"] = JSON::stringify(p_payload);
+	block["content"] = JSON::stringify(payload);
 	if (p_is_error) {
 		block["is_error"] = true;
 	}

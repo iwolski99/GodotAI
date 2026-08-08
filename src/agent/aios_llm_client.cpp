@@ -84,6 +84,7 @@ void AIOSLlmClient::reset_conversation() {
 void AIOSLlmClient::restore_conversation(const Array &p_history, int p_turn_count, const String &p_system_prompt) {
 	cancel();
 	history = p_history;
+	AIOSProvider::sanitize_conversation_history(history);
 	turn_count = p_turn_count > 0 ? p_turn_count : 0;
 	system_prompt = p_system_prompt;
 }
@@ -140,7 +141,9 @@ Error AIOSLlmClient::send_tool_results(const Array &p_results) {
 		return ERR_BUSY;
 	}
 
-	history.push_back(AIOSProvider::tool_result_message(p_results));
+	const Array assistant_ids = AIOSProvider::last_assistant_tool_use_ids(history);
+	const Array aligned = AIOSProvider::align_tool_results(p_results, assistant_ids);
+	history.push_back(AIOSProvider::tool_result_message(aligned));
 
 	Dictionary built = AIOSProvider::build_request(config, system_prompt, history, tools);
 	return _dispatch(built["body"], config.use_fallbacks && config.provider == "anthropic");

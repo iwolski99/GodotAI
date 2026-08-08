@@ -30,5 +30,5 @@ echo
 echo "After rebuilding:"
 echo "  1. Fully QUIT Godot (reloadable=false — restarting the project is not enough)"
 echo "  2. Re-open the project that contains project/addons/godot_ai_os/"
-echo "  3. In the AI Agent dock log, look for: Extension build $COMMIT loaded"
-echo "  4. In Settings, scroll down — Max tool turns + Extension build: $COMMIT"
+echo "  3. In the AI Agent dock log, look for: Extension build <commit> (<date>) loaded"
+echo "  4. In Settings, scroll down — Max tool turns + Extension build: <commit> (<date>)"

@@ -317,11 +317,14 @@ Dictionary AIOSProvider::build_request(const AIOSProviderConfig &p_config,
 	String note;
 	const String effort = clamp_effort(p_config, note);
 
+	Array messages = p_messages;
+	sanitize_conversation_history(messages);
+
 	Dictionary body;
 	body["model"] = p_config.model;
 
 	if (p_config.provider == "openrouter") {
-		body["messages"] = to_openai_messages(p_system, p_messages);
+		body["messages"] = to_openai_messages(p_system, messages);
 		body["max_tokens"] = p_config.max_tokens;
 		if (p_tools.size() > 0) {
 			body["tools"] = to_openai_tools(p_tools);
@@ -351,7 +354,7 @@ Dictionary AIOSProvider::build_request(const AIOSProviderConfig &p_config,
 	if (!p_system.strip_edges().is_empty()) {
 		body["system"] = p_system;
 	}
-	body["messages"] = p_messages;
+	body["messages"] = messages;
 	if (p_tools.size() > 0) {
 		body["tools"] = p_tools;
 	}
@@ -410,6 +413,147 @@ static void normalize_tool_call_ids(Array &r_calls) {
 		call["id"] = ensure_unique_tool_id(String(call.get("id", "")), i, used);
 		r_calls[i] = call;
 	}
+}
+
+static Array extract_tool_use_ids_from_content(const Array &p_blocks) {
+	Array ids;
+	for (int i = 0; i < p_blocks.size(); i++) {
+		if (Variant(p_blocks[i]).get_type() != Variant::DICTIONARY) {
+			continue;
+		}
+		Dictionary block = p_blocks[i];
+		if (String(block.get("type", "")) == "tool_use") {
+			ids.push_back(String(block.get("id", "")));
+		}
+	}
+	return ids;
+}
+
+static void normalize_assistant_tool_uses(Dictionary &r_msg) {
+	Variant content = r_msg.get("content", Array());
+	if (content.get_type() != Variant::ARRAY) {
+		return;
+	}
+
+	Array blocks = content;
+	Dictionary used;
+	int tool_idx = 0;
+	for (int i = 0; i < blocks.size(); i++) {
+		if (Variant(blocks[i]).get_type() != Variant::DICTIONARY) {
+			continue;
+		}
+		Dictionary block = blocks[i];
+		if (String(block.get("type", "")) != "tool_use") {
+			continue;
+		}
+		block["id"] = ensure_unique_tool_id(String(block.get("id", "")), tool_idx, used);
+		blocks[i] = block;
+		tool_idx++;
+	}
+	r_msg["content"] = blocks;
+}
+
+static void align_tool_results_in_message(Dictionary &r_msg, const Array &p_assistant_tool_ids) {
+	Variant content = r_msg.get("content", Array());
+	if (content.get_type() != Variant::ARRAY) {
+		return;
+	}
+
+	Array blocks = content;
+	Dictionary used;
+	int result_idx = 0;
+	for (int i = 0; i < blocks.size(); i++) {
+		if (Variant(blocks[i]).get_type() != Variant::DICTIONARY) {
+			continue;
+		}
+		Dictionary block = blocks[i];
+		if (String(block.get("type", "")) != "tool_result") {
+			continue;
+		}
+
+		String id = String(block.get("tool_use_id", "")).strip_edges();
+		if (result_idx < p_assistant_tool_ids.size()) {
+			const String expected = String(p_assistant_tool_ids[result_idx]).strip_edges();
+			if (!expected.is_empty()) {
+				id = expected;
+			}
+		}
+		block["tool_use_id"] = ensure_unique_tool_id(id, result_idx, used);
+		blocks[i] = block;
+		result_idx++;
+	}
+	r_msg["content"] = blocks;
+}
+
+void AIOSProvider::sanitize_conversation_history(Array &r_history) {
+	Array pending_assistant_ids;
+	for (int i = 0; i < r_history.size(); i++) {
+		if (Variant(r_history[i]).get_type() != Variant::DICTIONARY) {
+			continue;
+		}
+		Dictionary msg = r_history[i];
+		const String role = String(msg.get("role", "user"));
+
+		if (role == "assistant") {
+			normalize_assistant_tool_uses(msg);
+			pending_assistant_ids = extract_tool_use_ids_from_content(msg.get("content", Array()));
+			r_history[i] = msg;
+		} else if (role == "user" && pending_assistant_ids.size() > 0) {
+			align_tool_results_in_message(msg, pending_assistant_ids);
+			pending_assistant_ids.clear();
+			r_history[i] = msg;
+		}
+	}
+}
+
+Array AIOSProvider::last_assistant_tool_use_ids(const Array &p_history) {
+	for (int i = p_history.size() - 1; i >= 0; i--) {
+		if (Variant(p_history[i]).get_type() != Variant::DICTIONARY) {
+			continue;
+		}
+		Dictionary msg = p_history[i];
+		if (String(msg.get("role", "")) != "assistant") {
+			continue;
+		}
+		Variant content = msg.get("content", Array());
+		if (content.get_type() != Variant::ARRAY) {
+			continue;
+		}
+		Array ids = extract_tool_use_ids_from_content(content);
+		if (ids.size() > 0) {
+			return ids;
+		}
+	}
+	return Array();
+}
+
+Array AIOSProvider::align_tool_results(const Array &p_results, const Array &p_assistant_tool_ids) {
+	Array aligned;
+	Dictionary used;
+	int result_idx = 0;
+	for (int i = 0; i < p_results.size(); i++) {
+		if (Variant(p_results[i]).get_type() != Variant::DICTIONARY) {
+			aligned.push_back(p_results[i]);
+			continue;
+		}
+		Dictionary block = p_results[i];
+		if (String(block.get("type", "")) != "tool_result") {
+			aligned.push_back(block);
+			continue;
+		}
+
+		String id = String(block.get("tool_use_id", "")).strip_edges();
+		if (result_idx < p_assistant_tool_ids.size()) {
+			const String expected = String(p_assistant_tool_ids[result_idx]).strip_edges();
+			if (!expected.is_empty()) {
+				id = expected;
+			}
+		}
+		block["tool_use_id"] = ensure_unique_tool_id(id, result_idx, used);
+		aligned.push_back(block);
+		result_idx++;
+	}
+	return aligned;
 }
 
 /* -------------------------------------------------------------------------- */

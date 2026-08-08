@@ -411,7 +411,7 @@ Dictionary AIOSToolRegistry::call_tool(const String &p_tool, const Dictionary &p
 			p_tool != "create_checkpoint" && p_tool != "rollback_last") {
 		Dictionary checkpoint = git->create_checkpoint(p_tool);
 		if ((bool)checkpoint["ok"]) {
-			Dictionary result = envelope["result"];
+			Dictionary result = Dictionary(envelope["result"]).duplicate();
 			Dictionary cp = checkpoint["result"];
 			if ((bool)AIOSJson::get_bool(cp, "created", false)) {
 				result["checkpoint"] = cp["short_sha"];
@@ -420,7 +420,8 @@ Dictionary AIOSToolRegistry::call_tool(const String &p_tool, const Dictionary &p
 		}
 	}
 
-	Dictionary result_or_error = envelope.has("result") ? Dictionary(envelope["result"]) : Dictionary();
+	Dictionary result_or_error =
+			envelope.has("result") ? Dictionary(envelope["result"]).duplicate() : Dictionary();
 	result_or_error["elapsed_msec"] = (double)(Time::get_singleton()->get_ticks_usec() - started) / 1000.0;
 	if (envelope.has("result")) {
 		envelope["result"] = result_or_error;
