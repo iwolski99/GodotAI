@@ -41,6 +41,15 @@
 #define SETTING_AUTO_PLAYTEST "ai_agent_os/agent/auto_playtest"
 #define SETTING_AUTO_ROLLBACK "ai_agent_os/agent/auto_rollback"
 #define SETTING_REQUIRE_BRIEF "ai_agent_os/agent/require_brief"
+#define SETTING_DRIVER_LOCK "ai_agent_os/agent/driver_lock"
+#define SETTING_DOCK_ROUTING "ai_agent_os/agent/dock_routing"
+
+// dock_routing enum indices for Project Settings.
+enum AIOSDockRouting {
+	AIOS_DOCK_ROUTING_AUTO = 0,
+	AIOS_DOCK_ROUTING_BUILTIN = 1,
+	AIOS_DOCK_ROUTING_EXTERNAL = 2,
+};
 
 // Effort is stored as an index so Project Settings can render it as a dropdown;
 // this is the mapping to the strings both APIs actually take.
@@ -130,6 +139,66 @@ void AIOSPlugin::_register_project_settings() {
 	_setting(SETTING_AUTO_PLAYTEST, true, Variant::BOOL);
 	_setting(SETTING_AUTO_ROLLBACK, true, Variant::BOOL);
 	_setting(SETTING_REQUIRE_BRIEF, true, Variant::BOOL);
+	_setting(SETTING_DRIVER_LOCK, true, Variant::BOOL);
+	_setting(SETTING_DOCK_ROUTING, 0, Variant::INT, "Auto,Built-in,External");
+}
+
+bool AIOSPlugin::_pipeline_is_active() const {
+	if (pipeline.is_null()) {
+		return false;
+	}
+	const String stage = pipeline->get_stage_name();
+	return stage != "IDLE" && stage != "ERROR";
+}
+
+int AIOSPlugin::_dock_routing() const {
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	const int routing = (int)(int64_t)ps->get_setting(SETTING_DOCK_ROUTING, 0);
+	if (routing < 0 || routing > 2) {
+		return AIOS_DOCK_ROUTING_AUTO;
+	}
+	return routing;
+}
+
+Dictionary AIOSPlugin::_try_acquire_driver(const String &p_owner, int p_ipc_client) {
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	driver_lock_enabled = (bool)ps->get_setting(SETTING_DRIVER_LOCK, true);
+	if (!driver_lock_enabled) {
+		return AIOSJson::ok(Dictionary());
+	}
+
+	if (driver_owner.is_empty() || driver_owner == p_owner) {
+		if (p_owner == "ipc" && driver_owner == "ipc" && driver_ipc_client != -1 &&
+				driver_ipc_client != p_ipc_client) {
+			Dictionary details;
+			details["owner"] = driver_owner;
+			details["ipc_client"] = driver_ipc_client;
+			return AIOSJson::error("busy",
+					"Another IPC agent (client #" + String::num_int64(driver_ipc_client) +
+							") currently holds the driver lock. Wait for it to disconnect, or stop the other agent.",
+					details);
+		}
+		driver_owner = p_owner;
+		driver_ipc_client = p_owner == "ipc" ? p_ipc_client : -1;
+		return AIOSJson::ok(Dictionary());
+	}
+
+	Dictionary details;
+	details["owner"] = driver_owner;
+	if (driver_owner == "ipc") {
+		details["ipc_client"] = driver_ipc_client;
+	}
+	return AIOSJson::error("busy",
+			"The project driver lock is held by '" + driver_owner +
+					"'. Stop that run (or disconnect the other agent) before driving from here.",
+			details);
+}
+
+void AIOSPlugin::_release_driver(const String &p_owner) {
+	if (driver_owner == p_owner || (p_owner == "ipc" && driver_owner == "ipc")) {
+		driver_owner = String();
+		driver_ipc_client = -1;
+	}
 }
 
 /* -------------------------------------------------------------------------- */
@@ -446,6 +515,10 @@ void AIOSPlugin::_on_client_connected(int p_client_id, const String &p_remote) {
 
 void AIOSPlugin::_on_client_disconnected(int p_client_id, const String &p_reason) {
 	dock->append_log("info", vformat("Agent #%d disconnected (%s).", p_client_id, p_reason));
+	if (driver_owner == "ipc" && driver_ipc_client == p_client_id) {
+		_release_driver("ipc");
+		dock->append_log("info", "Released driver lock held by the disconnected IPC agent.");
+	}
 }
 
 void AIOSPlugin::_on_transport_log(const String &p_level, const String &p_message) {
@@ -471,7 +544,50 @@ void AIOSPlugin::_handle_request(int p_client_id, const Dictionary &p_message) {
 
 	dock->append_tool_call(tool, params);
 
-	Dictionary envelope = registry->call_tool(tool, params);
+	Dictionary envelope;
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	driver_lock_enabled = (bool)ps->get_setting(SETTING_DRIVER_LOCK, true);
+
+	// Mutating IPC calls (and playtests) are refused while the built-in pipeline
+	// holds the driver. Reads stay available. An IPC playtest briefly takes the
+	// lock so the dock cannot start a competing built-in run mid-Observe.
+	if (driver_lock_enabled && (AIOSToolRegistry::is_mutating(tool) || tool == "run_playtest")) {
+		if (_pipeline_is_active() || driver_owner == "builtin") {
+			Dictionary details;
+			details["owner"] = "builtin";
+			details["stage"] = pipeline.is_valid() ? pipeline->get_stage_name() : String("unknown");
+			envelope = AIOSJson::error("busy",
+					"The built-in agent currently holds the driver lock (" +
+							String(details["stage"]) +
+							"). Stop that run before mutating the project over IPC.",
+					details);
+		} else if (tool == "run_playtest") {
+			Dictionary acquired = _try_acquire_driver("ipc", p_client_id);
+			if (!(bool)acquired["ok"]) {
+				envelope = acquired;
+			}
+		} else if (driver_owner == "ipc" && driver_ipc_client != -1 && driver_ipc_client != p_client_id) {
+			Dictionary details;
+			details["owner"] = "ipc";
+			details["ipc_client"] = driver_ipc_client;
+			envelope = AIOSJson::error("busy",
+					"Another IPC agent holds the driver lock during its playtest. Wait for playtest_finished.",
+					details);
+		}
+	}
+
+	if (envelope.is_empty()) {
+		envelope = registry->call_tool(tool, params);
+	}
+
+	// If the playtest failed to launch, drop the short-lived IPC lock.
+	if (tool == "run_playtest" && driver_owner == "ipc" && driver_ipc_client == p_client_id) {
+		const bool launched = envelope.has("ok") && (bool)envelope["ok"];
+		if (!launched) {
+			_release_driver("ipc");
+		}
+	}
+
 	const bool ok = envelope.has("ok") && (bool)envelope["ok"];
 	dock->append_tool_result(tool, ok, envelope);
 
@@ -523,28 +639,44 @@ void AIOSPlugin::_handle_event(int p_client_id, const Dictionary &p_message) {
 /* -------------------------------------------------------------------------- */
 
 void AIOSPlugin::_on_prompt_submitted(const String &p_text, const String &p_mode) {
-	// The built-in agent takes precedence when it has a key: configuring one is
-	// a deliberate act, and silently routing the prompt to an external client
-	// instead would make that configuration look broken.
-	if (llm != nullptr && llm->is_configured()) {
-		// During the clarification interview, Send continues the conversation
-		// instead of starting a brand-new run that would discard the brief.
-		if (pipeline.is_valid() && pipeline->is_awaiting_user()) {
-			Dictionary continued = pipeline->continue_with_user_answer(p_text);
-			if (!(bool)continued["ok"]) {
-				Dictionary error = continued["error"];
-				dock->append_log("error", String(error["message"]));
-			}
+	const int routing = _dock_routing();
+	const bool key_ready = llm != nullptr && llm->is_configured();
+	const bool prefer_builtin = (routing == AIOS_DOCK_ROUTING_BUILTIN) ||
+			(routing == AIOS_DOCK_ROUTING_AUTO && key_ready);
+	const bool force_external = routing == AIOS_DOCK_ROUTING_EXTERNAL;
+
+	// Clarification answers always stay on the built-in pipeline when it is
+	// mid-interview — switching mid-brief would discard the conversation.
+	if (key_ready && pipeline.is_valid() && pipeline->is_awaiting_user()) {
+		Dictionary continued = pipeline->continue_with_user_answer(p_text);
+		if (!(bool)continued["ok"]) {
+			Dictionary error = continued["error"];
+			dock->append_log("error", String(error["message"]));
+		}
+		return;
+	}
+	if (key_ready && pipeline.is_valid() && pipeline->is_clarifying() && !pipeline->is_awaiting_user()) {
+		dock->append_log("warn",
+				"The agent is still thinking. Wait for its questions, or press Skip & Build.");
+		return;
+	}
+
+	if (prefer_builtin && !force_external && key_ready) {
+		if (playtest.is_valid() && playtest->is_running()) {
+			dock->append_log("error",
+					"A playtest is already running. Wait for it to finish (or Stop) before starting the built-in agent.");
 			return;
 		}
-		if (pipeline.is_valid() && pipeline->is_clarifying() && !pipeline->is_awaiting_user()) {
-			dock->append_log("warn",
-					"The agent is still thinking. Wait for its questions, or press Skip & Build.");
+		Dictionary acquired = _try_acquire_driver("builtin");
+		if (!(bool)acquired["ok"]) {
+			Dictionary error = acquired["error"];
+			dock->append_log("error", String(error["message"]));
 			return;
 		}
 
 		Dictionary started = pipeline->start(p_text, p_mode);
 		if (!(bool)started["ok"]) {
+			_release_driver("builtin");
 			Dictionary error = started["error"];
 			dock->append_log("error", String(error["message"]));
 		}
@@ -552,9 +684,15 @@ void AIOSPlugin::_on_prompt_submitted(const String &p_text, const String &p_mode
 	}
 
 	if (ipc->get_client_count() == 0) {
-		dock->append_log("warn",
-				"Nowhere to send that: no API key is configured for the built-in agent and no external "
-				"agent is connected. Open Settings in this dock to add a key.");
+		if (force_external) {
+			dock->append_log("warn",
+					"Dock routing is External, but no IPC agent is connected. Connect Cursor/MCP/your "
+					"harness, or switch Project Settings → AI Agent OS → agent/dock_routing to Auto or Built-in.");
+		} else {
+			dock->append_log("warn",
+					"Nowhere to send that: no API key is configured for the built-in agent and no external "
+					"agent is connected. Open Settings in this dock to add a key.");
+		}
 		return;
 	}
 	Dictionary data;
@@ -587,6 +725,7 @@ void AIOSPlugin::_on_stop_requested() {
 	if (pipeline.is_valid()) {
 		pipeline->stop();
 	}
+	_release_driver("builtin");
 	ipc->broadcast_event("stop", Dictionary());
 	dock->set_state_name("IDLE", "stopped by user");
 	dock->append_log("warn", "Stop requested. The agent should abandon its current step.");
@@ -777,6 +916,8 @@ void AIOSPlugin::_on_pipeline_run_finished(const Dictionary &p_summary) {
 		dock->append_log(ok ? "success" : "warn", String(p_summary.get("message", "Run finished.")));
 	}
 
+	_release_driver("builtin");
+
 	// A run that touched the filesystem — a rollback, or scripts written to
 	// disk — leaves the editor's cached view stale until it rescans.
 	if ((bool)p_summary.get("filesystem_changed", false)) {
@@ -813,6 +954,10 @@ void AIOSPlugin::_on_playtest_finished(const Dictionary &p_report) {
 	const String outcome = p_report.get("outcome", "none");
 	if (dock != nullptr) {
 		dock->append_log(outcome == "clean" ? "success" : "warn", String(p_report.get("summary", "")));
+	}
+	// IPC playtests hold the driver only for the Observe window.
+	if (driver_owner == "ipc") {
+		_release_driver("ipc");
 	}
 	// The pipeline listens to this signal directly; the broadcast is for
 	// external agents, which have no other way to learn the result of a

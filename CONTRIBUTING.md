@@ -111,8 +111,10 @@ fastest way to show what happened.
 ## Ideas that would help most right now
 
 - macOS and Windows build verification (Milestone 1 was tested on Linux only)
-- An MCP server wrapper — the schemas are already in the right shape, see
-  [docs/AGENTS.md](docs/AGENTS.md#model-context-protocol)
+- Asset pipeline tools / plan review / diff preview (remaining Milestone 3)
+- macOS and Windows build verification
+- The MCP server now ships in [`clients/mcp/`](clients/mcp/README.md) — feedback
+  from real Cursor setups is especially useful
 - Concrete opinions on Milestone 2's scope, from someone who has tried to run an
   agent against a real project
 

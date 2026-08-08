@@ -54,4 +54,14 @@ public:
 	// about what to build. Mutating scene/script tools are withheld until
 	// commit_brief succeeds.
 	static bool is_clarify_phase_tool(const String &p_tool);
+
+	// Role permissions for the built-in agent modes (architect / coder /
+	// debugger / playtester). IPC clients are not role-scoped.
+	static bool is_allowed_for_role(const String &p_tool, const String &p_role);
+
+	// Per-project agent memory helpers (also exposed as remember / recall_memory).
+	static Dictionary load_memory();
+	static Dictionary remember(const Dictionary &p_params);
+	static Dictionary recall_memory(const Dictionary &p_params);
+	static String format_memory_for_prompt(int p_limit = 24);
 };

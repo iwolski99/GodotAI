@@ -253,8 +253,11 @@ broken.
 | --- | --- | --- |
 | `max_turns` | 24 | Hard cap on model turns per run. Stops a loop running up a bill. |
 | `max_repair_attempts` | 3 | Consecutive failures before the pipeline rolls back and stops. |
-| `auto_playtest` | on | Allow the pipeline to run the game as part of its loop. |
+| `auto_playtest` | on | After a batch that called `save_scene`, run a short smoke playtest before continuing. |
 | `auto_rollback` | on | `git reset --hard` to the step snapshot when the repair budget is spent. |
+| `require_brief` | on | Interview before build in architect/coder modes. |
+| `driver_lock` | on | Refuse IPC mutations while the built-in pipeline holds the project. |
+| `dock_routing` | Auto | `Auto` / `Built-in` / `External` — where dock prompts go when a key and/or IPC client exist. |
 
 ---
 

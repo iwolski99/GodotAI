@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "recall_memory",
+  "title": "recall_memory",
+  "description": "Read previously stored project notes (conventions, failures, decisions). Call early in a session when you need prior context beyond the scene tree. Newest matching entries are returned first.",
+  "mutating": false,
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "category": {
+      "type": "string",
+      "description": "If set, only return notes with this category."
+    },
+    "query": {
+      "type": "string",
+      "description": "If set, only return notes whose text contains this substring (case-insensitive)."
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum number of notes to return.",
+      "default": 32,
+      "minimum": 1,
+      "maximum": 200
+    }
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "entries": { "type": "array" },
+      "count": { "type": "integer" },
+      "total": { "type": "integer" },
+      "path": { "type": "string" }
+    }
+  }
+}

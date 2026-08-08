@@ -77,12 +77,12 @@ pipeline is a second, in-process orchestrator.
 | --- | --- | --- |
 | High | Playtest repair budget reset the counter and continued the model loop instead of aborting | **Fixed** on this branch |
 | High | Scene repair budget with `auto_rollback` off could also loop forever | **Fixed** on this branch |
-| High | No mutual exclusion between built-in pipeline and IPC agents | Proposed (major) |
-| High | Dock prompts go only to the built-in agent when an API key exists | Proposed (major) |
+| High | No mutual exclusion between built-in pipeline and IPC agents | **Fixed** (driver_lock) |
+| High | Dock prompts go only to the built-in agent when an API key exists | **Fixed** (dock_routing) |
 | High | Native crash with no script errors can be reported as playtest `clean` (no cross-platform exit-code API) | Proposed |
 | Medium | Stop during playtest could restart the model via synchronous `playtest_finished` | **Fixed** on this branch |
 | Medium | Skip & Build mapped any goal containing `fps` to 3D | **Fixed** on this branch |
-| Medium | `auto_playtest` setting is wired on the pipeline but never read | Proposed |
+| Medium | `auto_playtest` setting is wired on the pipeline but never read | **Fixed** (Milestone 3 branch) |
 | Medium | Clarify / `commit_brief` gates are pipeline-local; IPC can still mutate | Proposed (major) |
 | Medium | Unsaved scene edits are invisible to playtest and git snapshots (documented, still a common failure mode) | Known / docs |
 | Low | `user_questions_requested` / `brief_committed` signals unused by the plugin (dock already works via stage + chat) | Optional cleanup |
@@ -148,10 +148,12 @@ semantics if both an agent and a human act.
 5. **Crash-as-clean.** Process death without logged `SCRIPT ERROR` / `ERROR`
    lines becomes `clean` because Godot’s `OS` API has no portable exit status
    here. A segfault can look like success.
-6. **`auto_playtest` dead.** The setting is stored and exposed but never
-   consulted; Observe only happens if the model chooses `run_playtest`.
+6. **`auto_playtest` dead.** ~~The setting is stored and exposed but never
+   consulted.~~ **Fixed:** after a batch that called `save_scene`, the pipeline
+   launches a short smoke test when the setting is on.
 7. **Unsaved scenes.** Playtest and git see disk only. Forgetting `save_scene`
-   means the agent playtests or rolls back the wrong state.
+   means the agent playtests or rolls back the wrong state. (`auto_playtest`
+   only helps after a save.)
 
 ---
 

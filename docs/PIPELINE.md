@@ -641,9 +641,11 @@ Project Settings → **AI Agent OS**:
 | --- | --- | --- |
 | `agent/max_turns` | 24 | Hard cap on model turns in one run. Stops a loop from running up a bill. |
 | `agent/max_repair_attempts` | 3 | Consecutive failures before rollback and abort. |
-| `agent/auto_playtest` | on | Let the pipeline run a playtest as part of its loop. |
+| `agent/auto_playtest` | on | After a mutating batch that called `save_scene`, launch a 60-frame headless smoke test and feed the report back (or end the run if the model already finished). |
 | `agent/auto_rollback` | on | Reset to the step snapshot when the repair budget is spent. Turn off to inspect the wreckage. |
 | `agent/require_brief` | on | Interview before build in architect/coder modes. Off skips straight to planning. |
+| `agent/driver_lock` | on | Built-in pipeline XOR mutating IPC — the other path gets `busy`. |
+| `agent/dock_routing` | Auto | `Auto` (key → built-in, else IPC), `Built-in`, or `External` (always broadcast `user_prompt`). |
 | `vcs/auto_checkpoint` | on | Commit after each mutating tool call. |
 
 Turning `auto_rollback` off is a debugging aid: the run still aborts, but the
@@ -659,8 +661,12 @@ in the dock so you can reset by hand.
   script to it" is load-bearing.
 - **No partial rollback.** The unit of undo is a batch, not a call. See the batch
   snapshot note above.
-- **No cross-run memory.** Each run starts a fresh conversation. Per-project agent
-  memory is Milestone 3.
+- **Cross-run memory is opt-in via tools.** Each conversation still starts fresh,
+  but `remember` / `recall_memory` persist notes in
+  `.godot/ai_agent_os/memory.json`, and the built-in prompt includes recent
+  notes at run start.
 - **The pipeline cannot save your scene for you.** It tells the model to call
   `save_scene`, and a snapshot only captures what is on disk. Silently writing a
-  file a human has open is worse than losing an agent's work.
+  file a human has open is worse than losing an agent's work. When
+  `auto_playtest` is on, a successful `save_scene` in a batch triggers a smoke
+  test so a run cannot end with zero runtime proof after a save.

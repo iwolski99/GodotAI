@@ -37,12 +37,23 @@ private:
 	double status_accumulator = 0.0;
 	int last_reported_clients = -1;
 
+	// Driver lock: built-in pipeline XOR mutating IPC. Prevents two agents from
+	// overwriting the same scene/playtest/git state mid-run.
+	bool driver_lock_enabled = true;
+	String driver_owner; // "", "builtin", or "ipc"
+	int driver_ipc_client = -1;
+
 	void _register_project_settings();
 	Variant _setting(const String &p_name, const Variant &p_default, int p_type, const String &p_hint_string = String());
 	String _generate_token() const;
 	void _write_session_file();
 	void _remove_session_file();
 	void _start_transport();
+
+	bool _pipeline_is_active() const;
+	Dictionary _try_acquire_driver(const String &p_owner, int p_ipc_client = -1);
+	void _release_driver(const String &p_owner);
+	int _dock_routing() const;
 
 	// Model configuration lives in ProjectSettings so it survives a restart and
 	// can be reviewed in one place; the dock is a view onto it, not a second

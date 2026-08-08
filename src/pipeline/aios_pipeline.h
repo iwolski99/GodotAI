@@ -97,12 +97,19 @@ private:
 	Dictionary pending_questions;
 	Dictionary committed_brief;
 
+	// auto_playtest bookkeeping: smoke-test after a mutating batch that saved.
+	bool batch_saved_scene = false;
+	bool saved_since_last_playtest = false;
+	bool auto_playtest_inflight = false;
+	bool finish_after_auto_playtest = false;
+
 	void _set_stage(Stage p_stage, const String &p_detail);
 	void _handle_tool_calls(const Array &p_calls);
 	void _execute_call(const Dictionary &p_call);
 	void _finish_turn();
 	void _push_result(const String &p_id, const Dictionary &p_payload, bool p_is_error);
 	void _abort(const String &p_code, const String &p_message);
+	bool _maybe_launch_auto_playtest(bool p_finish_run_after);
 
 	void _apply_tools_for_phase();
 	bool _mode_requires_brief(const String &p_mode) const;
@@ -159,5 +166,6 @@ public:
 
 	// The system prompt handed to the model, assembled from the mode and the
 	// project's state.
-	static String build_system_prompt(const String &p_mode, bool p_git_available, bool p_clarifying = false);
+	static String build_system_prompt(const String &p_mode, bool p_git_available, bool p_clarifying = false,
+			const String &p_memory_block = String());
 };

@@ -106,16 +106,33 @@ Making it something other people can rely on.
   design brief; mutating tools stay withheld until then. Dock shows
   `CLARIFYING`, routes answers into the open interview, and offers
   **Skip & Build**.
-- Agent roles with distinct tool permissions (an Architect that cannot write
-  files; a Debugger that cannot delete)
+- [x] **Agent roles with distinct tool permissions** — Architect cannot write
+  scripts or delete; Debugger cannot delete or roll back; Playtester is
+  observe-only. Enforced in the built-in tool list and at execute time.
+- [x] **MCP server** — `clients/mcp/server.py` exposes the live tool manifest to
+  Cursor / Claude Desktop over stdio (Content-Length framing). See
+  [clients/mcp/README.md](../clients/mcp/README.md).
+- [x] **Driver lock + dock routing** — `agent/driver_lock` (default on) stops IPC
+  mutations while the built-in pipeline runs; `agent/dock_routing`
+  (`Auto` / `Built-in` / `External`) controls whether dock prompts go to the
+  built-in agent or an external harness.
+- [x] **Wire `auto_playtest`** — after a mutating batch that called `save_scene`,
+  the pipeline launches a short `quit_after_frames` smoke test when the setting
+  is on.
+- [x] **Per-project agent memory** — `remember` / `recall_memory` tools; notes
+  live in `.godot/ai_agent_os/memory.json` and are injected into the built-in
+  system prompt on the next run.
+- [x] **Playtest crash heuristic** — silent immediate process death without
+  `quit_after_frames` is reported as `crashed`, not `clean`.
+- [x] **Python `wait_playtest`** — reference client helper for the Observe half
+  of external harnesses.
 - Plan review: the agent proposes a sequence, the human approves it in the dock,
   and only then does it execute
 - Diff preview in the dock before a batch of mutations lands
-- MCP server so any MCP-capable client connects with no adapter code
 - Asset pipeline tools — import, texture and audio handling
-- Per-project agent memory: what was tried, what broke, what the conventions are
 - Prebuilt binaries on GitHub Releases for Linux, macOS and Windows
 - CI: build matrix, headless integration tests against a real editor
+- Server-side pipeline mode over IPC (Validate → Observe → Repair as events)
 
 ---
 

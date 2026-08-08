@@ -8,6 +8,7 @@
 #include "../validate/aios_validator.h"
 #include "aios_scene_tools.h"
 
+#include <godot_cpp/classes/dir_access.hpp>
 #include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/json.hpp>
 #include <godot_cpp/classes/time.hpp>
@@ -15,6 +16,9 @@
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #define AIOS_SCHEMA_DIR "res://addons/godot_ai_os/schemas/"
+#define AIOS_MEMORY_DIR "res://.godot/ai_agent_os"
+#define AIOS_MEMORY_FILE AIOS_MEMORY_DIR "/memory.json"
+#define AIOS_MEMORY_MAX_ENTRIES 200
 
 struct ToolInfo {
 	const char *name;
@@ -45,6 +49,8 @@ static const ToolInfo TOOL_TABLE[] = {
 	{ "run_playtest", "Launch the game in a child process and return its runtime errors and stack traces.", false },
 	{ "create_checkpoint", "Commit the current project state as a rollback point.", true },
 	{ "rollback_last", "Revert the most recent checkpoint.", true },
+	{ "remember", "Store a durable note about this project (conventions, failures, decisions) for future agent runs.", false },
+	{ "recall_memory", "Read previously stored project notes. Call early in a session to reuse conventions and failure history.", false },
 	{ "list_tools", "This manifest, including the JSON schema of every tool.", false },
 	{ "ping", "Liveness check; returns the editor version and world-model revision.", false },
 };
@@ -83,7 +89,149 @@ bool AIOSToolRegistry::is_mutating(const String &p_tool) {
 
 bool AIOSToolRegistry::is_clarify_phase_tool(const String &p_tool) {
 	return p_tool == "ask_user" || p_tool == "commit_brief" || p_tool == "get_world_model" ||
-			p_tool == "list_tools" || p_tool == "ping" || p_tool == "read_script" || p_tool == "open_scene";
+			p_tool == "list_tools" || p_tool == "ping" || p_tool == "read_script" || p_tool == "open_scene" ||
+			p_tool == "remember" || p_tool == "recall_memory";
+}
+
+bool AIOSToolRegistry::is_allowed_for_role(const String &p_tool, const String &p_role) {
+	const String role = p_role.to_lower();
+	if (role.is_empty() || role == "coder") {
+		return true;
+	}
+	if (role == "architect") {
+		// Architect plans structure but does not write script files or delete.
+		return p_tool != "attach_script_safe" && p_tool != "patch_script" &&
+				p_tool != "safe_delete_node" && p_tool != "rollback_last";
+	}
+	if (role == "debugger") {
+		// Debugger may edit and playtest, but must not delete or hard-roll back.
+		return p_tool != "safe_delete_node" && p_tool != "rollback_last";
+	}
+	if (role == "playtester") {
+		return p_tool == "get_world_model" || p_tool == "run_playtest" || p_tool == "validate_scene" ||
+				p_tool == "validate_change" || p_tool == "read_script" || p_tool == "open_scene" ||
+				p_tool == "list_tools" || p_tool == "ping" || p_tool == "ask_user" ||
+				p_tool == "remember" || p_tool == "recall_memory";
+	}
+	return true;
+}
+
+Dictionary AIOSToolRegistry::load_memory() {
+	Dictionary store;
+	store["entries"] = Array();
+	if (!FileAccess::file_exists(AIOS_MEMORY_FILE)) {
+		return store;
+	}
+	Variant parsed = JSON::parse_string(FileAccess::get_file_as_string(AIOS_MEMORY_FILE));
+	if (parsed.get_type() != Variant::DICTIONARY) {
+		return store;
+	}
+	Dictionary d = parsed;
+	if (!d.has("entries") || d["entries"].get_type() != Variant::ARRAY) {
+		d["entries"] = Array();
+	}
+	return d;
+}
+
+static Error _aios_save_memory(const Dictionary &p_store) {
+	if (!DirAccess::dir_exists_absolute(AIOS_MEMORY_DIR)) {
+		Error err = DirAccess::make_dir_recursive_absolute(AIOS_MEMORY_DIR);
+		if (err != OK) {
+			return err;
+		}
+	}
+	Ref<FileAccess> file = FileAccess::open(AIOS_MEMORY_FILE, FileAccess::WRITE);
+	if (file.is_null()) {
+		return ERR_CANT_CREATE;
+	}
+	file->store_string(JSON::stringify(p_store, "\t"));
+	file->close();
+	return OK;
+}
+
+Dictionary AIOSToolRegistry::remember(const Dictionary &p_params) {
+	const String text = AIOSJson::get_string(p_params, "text", "").strip_edges();
+	if (text.is_empty()) {
+		return AIOSJson::error("missing_parameter", "'text' is required and must be non-empty.");
+	}
+	String category = AIOSJson::get_string(p_params, "category", "note").to_lower().strip_edges();
+	if (category.is_empty()) {
+		category = "note";
+	}
+
+	Dictionary store = load_memory();
+	Array entries = store["entries"];
+	Dictionary entry;
+	entry["id"] = String::num_int64((int64_t)Time::get_singleton()->get_unix_time_from_system()) + "-" +
+			String::num_int64(entries.size());
+	entry["category"] = category;
+	entry["text"] = text;
+	entry["created_at"] = Time::get_singleton()->get_unix_time_from_system();
+	entries.push_back(entry);
+
+	while (entries.size() > AIOS_MEMORY_MAX_ENTRIES) {
+		entries.remove_at(0);
+	}
+	store["entries"] = entries;
+	store["updated_at"] = Time::get_singleton()->get_unix_time_from_system();
+
+	if (_aios_save_memory(store) != OK) {
+		return AIOSJson::error("write_failed", "Could not write " + String(AIOS_MEMORY_FILE) + ".");
+	}
+
+	Dictionary result;
+	result["stored"] = true;
+	result["entry"] = entry;
+	result["count"] = entries.size();
+	result["path"] = AIOS_MEMORY_FILE;
+	return AIOSJson::ok(result);
+}
+
+Dictionary AIOSToolRegistry::recall_memory(const Dictionary &p_params) {
+	Dictionary store = load_memory();
+	Array entries = store["entries"];
+	const String category = AIOSJson::get_string(p_params, "category", "").to_lower().strip_edges();
+	const String query = AIOSJson::get_string(p_params, "query", "").to_lower().strip_edges();
+	const int64_t limit = AIOSJson::get_int(p_params, "limit", 32);
+
+	Array matched;
+	for (int i = entries.size() - 1; i >= 0; i--) {
+		Dictionary entry = entries[i];
+		if (!category.is_empty() && String(entry.get("category", "")).to_lower() != category) {
+			continue;
+		}
+		if (!query.is_empty() && !String(entry.get("text", "")).to_lower().contains(query)) {
+			continue;
+		}
+		matched.push_back(entry);
+		if (limit > 0 && matched.size() >= (int)limit) {
+			break;
+		}
+	}
+
+	Dictionary result;
+	result["entries"] = matched;
+	result["count"] = matched.size();
+	result["total"] = entries.size();
+	result["path"] = AIOS_MEMORY_FILE;
+	return AIOSJson::ok(result);
+}
+
+String AIOSToolRegistry::format_memory_for_prompt(int p_limit) {
+	Dictionary store = load_memory();
+	Array entries = store["entries"];
+	if (entries.is_empty()) {
+		return String();
+	}
+	String out = "## Project memory (from prior runs)\n\n";
+	const int start = entries.size() > p_limit ? entries.size() - p_limit : 0;
+	for (int i = start; i < entries.size(); i++) {
+		Dictionary entry = entries[i];
+		out += "- [" + String(entry.get("category", "note")) + "] " + String(entry.get("text", "")) + "\n";
+	}
+	out += "\nUse remember to add durable notes (conventions, what broke, decisions). "
+		   "Call recall_memory when you need to search.\n\n";
+	return out;
 }
 
 Dictionary AIOSToolRegistry::_load_schema(const String &p_tool) {
@@ -253,6 +401,10 @@ Dictionary AIOSToolRegistry::call_tool(const String &p_tool, const Dictionary &p
 	} else if (p_tool == "rollback_last") {
 		envelope = git.is_valid() ? git->rollback_last()
 								  : AIOSJson::error("not_initialised", "Checkpointing is unavailable.");
+	} else if (p_tool == "remember") {
+		envelope = remember(p_params);
+	} else if (p_tool == "recall_memory") {
+		envelope = recall_memory(p_params);
 	} else if (p_tool == "list_tools") {
 		Dictionary result;
 		result["tools"] = list_tools();

@@ -197,20 +197,34 @@ are watching a dock, not a log file, and they can stop you at any point.
 
 ## Model Context Protocol
 
-There is no MCP server in this repo yet. Writing one is a thin wrapper — the
-tool schemas are already JSON Schema, and `session_ready` hands you the whole
-manifest at runtime, so an MCP server is roughly:
+An MCP server ships in [`clients/mcp/`](../clients/mcp/README.md). It reads the
+tool manifest from `session_ready` and forwards every `tools/call` to the bridge
+(no third-party packages). Point Cursor at it:
 
-```python
-mcp_tools = [
-    types.Tool(name=t["name"], description=t["summary"], inputSchema=t["input_schema"])
-    for t in godot.tools.values()
-]
-# ... and forward call_tool straight through to godot.call()
+```json
+{
+  "mcpServers": {
+    "godot-ai-os": {
+      "command": "python3",
+      "args": [
+        "/absolute/path/to/GodotAI/clients/mcp/server.py",
+        "--project",
+        "/absolute/path/to/your-godot-project"
+      ]
+    }
+  }
+}
 ```
 
-If you build one, a pull request would be welcome — see
-[CONTRIBUTING.md](../CONTRIBUTING.md).
+Open the project in Godot first. The MCP path exposes **tools only** — it does
+not run the built-in Clarify → Validate → Repair loop. Prefer `dry_run`,
+`validate_change`, and `run_playtest` (the server waits for
+`playtest_finished` via `GodotAIClient.wait_playtest`).
+
+If the built-in agent holds the **driver lock**, mutating tools return `busy`
+until that run finishes or is stopped. Set Project Settings → AI Agent OS →
+`agent/dock_routing` to **External** when you want dock prompts to reach your
+MCP/harness instead of the built-in client.
 
 ---
 

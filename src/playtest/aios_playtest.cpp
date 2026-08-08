@@ -85,6 +85,10 @@ Dictionary AIOSPlaytest::start(const Dictionary &p_params) {
 	if (timeout_sec <= 0.0) {
 		timeout_sec = 60.0;
 	}
+	quit_after_frames = AIOSJson::get_int(p_params, "quit_after_frames", 0);
+	if (quit_after_frames < 0) {
+		quit_after_frames = 0;
+	}
 
 	if (!DirAccess::dir_exists_absolute(AIOS_PLAYTEST_DIR)) {
 		DirAccess::make_dir_recursive_absolute(AIOS_PLAYTEST_DIR);
@@ -115,12 +119,11 @@ Dictionary AIOSPlaytest::start(const Dictionary &p_params) {
 		args.push_back("--headless");
 	}
 
-	const int64_t quit_after = AIOSJson::get_int(p_params, "quit_after_frames", 0);
-	if (quit_after > 0) {
+	if (quit_after_frames > 0) {
 		// Deterministic exit for smoke tests: the game shuts itself down after
 		// N frames instead of relying on the timeout to kill it.
 		args.push_back("--quit-after");
-		args.push_back(String::num_int64(quit_after));
+		args.push_back(String::num_int64(quit_after_frames));
 	}
 
 	args.push_back(scene);
@@ -301,9 +304,19 @@ void AIOSPlaytest::poll(double p_delta) {
 		running = false;
 		// is_process_running() tells us the child is gone but not why. Godot's
 		// OS API has no cross-platform exit-status query, so the outcome is
-		// derived from what the run logged rather than from an exit code we
-		// cannot read.
-		const Outcome outcome = error_count > 0 ? OUTCOME_ERRORS : OUTCOME_CLEAN;
+		// derived from what the run logged — plus a heuristic for silent
+		// immediate death that would otherwise look like a clean pass.
+		Outcome outcome = OUTCOME_CLEAN;
+		if (error_count > 0) {
+			outcome = OUTCOME_ERRORS;
+		} else if (quit_after_frames <= 0 && elapsed < 0.75 && output_lines.size() < 3) {
+			// No quit_after_frames, almost no output, died in under a second:
+			// treat as a crash rather than a false clean. Intentional smoke
+			// tests set quit_after_frames and are exempt.
+			outcome = OUTCOME_CRASHED;
+		} else if (quit_after_frames <= 0 && elapsed < 0.15) {
+			outcome = OUTCOME_CRASHED;
+		}
 		emit_signal("playtest_finished", _build_report(outcome, 0));
 		return;
 	}
@@ -350,7 +363,13 @@ Dictionary AIOSPlaytest::_build_report(Outcome p_outcome, int p_exit_code) {
 			break;
 		case OUTCOME_CRASHED:
 			outcome_name = "crashed";
-			summary = "The process exited abnormally.";
+			if (error_count == 0 && elapsed < 0.75) {
+				summary = "The process exited almost immediately without logging errors — treated as a "
+						  "crash (Godot exposes no portable exit code here). Re-run with quit_after_frames "
+						  "for a deterministic smoke test, or check the engine log.";
+			} else {
+				summary = "The process exited abnormally.";
+			}
 			break;
 		case OUTCOME_TIMEOUT:
 			outcome_name = "timeout";

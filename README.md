@@ -25,11 +25,12 @@ No wondering what it just did to your project.
       └─ ask until 2D/3D + brief are locked (or Skip & Build)
 ```
 
-> **Status: Milestone 2 of 3 — shipped and working.** The pipeline, transactional
-> git rollback, playtest error interception, pre-execution validation and the
-> built-in Anthropic/OpenRouter agent are complete and tested end to end against
-> Godot 4.4.1 on Linux. Windows code paths are written but not yet verified on a
-> Windows machine. See the [roadmap](docs/ROADMAP.md) for what's next.
+> **Status: Milestone 3 in progress.** Milestones 1–2 are shipped (pipeline,
+> transactional git rollback, playtest interception, validation, built-in agent).
+> Milestone 3 adds an [MCP server](clients/mcp/README.md) for Cursor, driver lock /
+> dock routing, wired `auto_playtest`, role permissions, and per-project memory —
+> see [docs/MILESTONE-3-PROGRESS.md](docs/MILESTONE-3-PROGRESS.md). Windows code
+> paths are written but not yet verified on a Windows machine.
 
 ![The AI Agent dock in the Godot editor, showing an agent creating a node, attaching a script, and being refused a delete](docs/images/dock.png)
 
@@ -203,7 +204,9 @@ event loop: **[docs/AGENTS.md](docs/AGENTS.md)**.
 | **[Protocol](docs/PROTOCOL.md)** | The wire format, message by message. |
 | **[Architecture](docs/ARCHITECTURE.md)** | How it works and why it's built this way. |
 | **[Connecting agents](docs/AGENTS.md)** | Harness integration, Claude example, system prompt. |
+| **[MCP server](clients/mcp/README.md)** | Cursor / Claude Desktop — one-click tools over the live bridge. |
 | **[Pipeline](docs/PIPELINE.md)** | The agent loop: diagrams, pseudocode, error interception, prompt wrappers. |
+| **[Milestone 3 progress](docs/MILESTONE-3-PROGRESS.md)** | What landed in the current Milestone 3 slice. |
 | **[Roadmap](docs/ROADMAP.md)** | Milestone 3, what shipped, and what's deliberately out of scope. |
 | **[Tool schemas](project/addons/godot_ai_os/schemas/)** | The authoritative tool contracts. |
 

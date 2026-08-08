@@ -238,6 +238,9 @@ void AIOSPipeline::_apply_tools_for_phase() {
 		if (is_clarifying() && !AIOSToolRegistry::is_clarify_phase_tool(name)) {
 			continue;
 		}
+		if (!AIOSToolRegistry::is_allowed_for_role(name, mode)) {
+			continue;
+		}
 		Dictionary tool;
 		tool["name"] = name;
 		tool["description"] = entry["summary"];
@@ -317,7 +320,7 @@ void AIOSPipeline::_enter_build_phase(const Dictionary &p_brief, bool p_skipped_
 
 	const bool git_ok = git.is_valid() && git->is_available();
 	if (llm != nullptr) {
-		llm->set_system_prompt(build_system_prompt(mode, git_ok, false));
+		llm->set_system_prompt(build_system_prompt(mode, git_ok, false, AIOSToolRegistry::format_memory_for_prompt()));
 	}
 	_apply_tools_for_phase();
 
@@ -333,11 +336,16 @@ void AIOSPipeline::_enter_build_phase(const Dictionary &p_brief, bool p_skipped_
 /*  System prompt                                                              */
 /* -------------------------------------------------------------------------- */
 
-String AIOSPipeline::build_system_prompt(const String &p_mode, bool p_git_available, bool p_clarifying) {
+String AIOSPipeline::build_system_prompt(const String &p_mode, bool p_git_available, bool p_clarifying,
+		const String &p_memory_block) {
 	String prompt =
 			"You are an autonomous game developer working inside the Godot 4 editor through the AI Agent OS "
 			"plugin. You have tools that read and modify a live Godot project. The human can see everything you "
 			"do in a dock and can stop you at any time.\n\n";
+
+	if (!p_memory_block.is_empty()) {
+		prompt += p_memory_block;
+	}
 
 	if (p_clarifying) {
 		prompt +=
@@ -405,8 +413,8 @@ String AIOSPipeline::build_system_prompt(const String &p_mode, bool p_git_availa
 		prompt +=
 				"Plan before you build. Inspect the project, propose a concrete structure, and explain the "
 				"trade-offs in a sentence or two before creating anything. Prefer a small number of "
-				"well-named nodes over a deep tree. Do not write gameplay code unless the plan needs it to "
-				"be meaningful.";
+				"well-named nodes over a deep tree. Script-writing tools (attach_script_safe, patch_script) "
+				"and deletes are withheld in this role — leave gameplay code to Coder mode.";
 	} else if (m == "coder") {
 		prompt +=
 				"Implement what was asked, completely. Write GDScript that reads like the rest of the "
@@ -418,12 +426,13 @@ String AIOSPipeline::build_system_prompt(const String &p_mode, bool p_git_availa
 				"Find the actual cause before changing anything. Run the playtest, read the diagnostics, and "
 				"open the file the error points at. Fix the specific cause, then run the playtest again to "
 				"confirm. Do not fix things that are not broken, and do not declare it fixed without a clean "
-				"run to show for it.";
+				"run to show for it. safe_delete_node and rollback_last are withheld in this role.";
 	} else if (m == "playtester") {
 		prompt +=
 				"Exercise the game and report what actually happens. Run the playtest, read every diagnostic, "
 				"and describe both what worked and what did not. Report findings faithfully - a run that "
-				"failed is a useful result, not something to work around.";
+				"failed is a useful result, not something to work around. You have read/observe tools only; "
+				"you cannot mutate the project in this role.";
 	} else {
 		prompt += "Work on the task as asked, using the tools available.";
 	}
@@ -458,6 +467,10 @@ Dictionary AIOSPipeline::start(const String &p_goal, const String &p_mode) {
 	committed_brief.clear();
 	brief_ready = false;
 	clarifying = _mode_requires_brief(mode);
+	batch_saved_scene = false;
+	saved_since_last_playtest = false;
+	auto_playtest_inflight = false;
+	finish_after_auto_playtest = false;
 
 	const bool git_ok = git.is_valid() && git->is_available();
 	if (!git_ok) {
@@ -477,7 +490,7 @@ Dictionary AIOSPipeline::start(const String &p_goal, const String &p_mode) {
 	}
 
 	llm->reset_conversation();
-	llm->set_system_prompt(build_system_prompt(mode, git_ok, clarifying));
+	llm->set_system_prompt(build_system_prompt(mode, git_ok, clarifying, AIOSToolRegistry::format_memory_for_prompt()));
 	_apply_tools_for_phase();
 
 	if (clarifying) {
@@ -581,7 +594,7 @@ Dictionary AIOSPipeline::skip_clarification_and_build() {
 
 	const bool git_ok = git.is_valid() && git->is_available();
 	llm->reset_conversation();
-	llm->set_system_prompt(build_system_prompt(mode, git_ok, false));
+	llm->set_system_prompt(build_system_prompt(mode, git_ok, false, AIOSToolRegistry::format_memory_for_prompt()));
 	_apply_tools_for_phase();
 
 	_set_stage(STAGE_PLANNING, "building from the skipped-interview brief");
@@ -607,6 +620,8 @@ void AIOSPipeline::stop() {
 	// true the handler would restart a model turn after the human pressed Stop.
 	awaiting_playtest = false;
 	awaiting_user = false;
+	auto_playtest_inflight = false;
+	finish_after_auto_playtest = false;
 	ask_user_tool_use_id = String();
 	pending_questions.clear();
 	pending_results.clear();
@@ -688,7 +703,13 @@ void AIOSPipeline::_on_model_response(const Dictionary &p_response) {
 			return;
 		}
 
-		// No tool calls means the model considers the task finished.
+		// No tool calls means the model considers the task finished — but if
+		// auto_playtest is on and a save has not been smoke-tested yet, prove
+		// the runtime before declaring victory.
+		if (_maybe_launch_auto_playtest(true)) {
+			return;
+		}
+
 		_set_stage(STAGE_IDLE, "done");
 
 		Dictionary summary;
@@ -720,6 +741,9 @@ void AIOSPipeline::_on_model_failed(const Dictionary &p_error) {
 void AIOSPipeline::_handle_tool_calls(const Array &p_calls) {
 	pending_results.clear();
 	deferred_calls.clear();
+	batch_saved_scene = false;
+	auto_playtest_inflight = false;
+	finish_after_auto_playtest = false;
 
 	// One snapshot per batch, not per call. A model routinely emits several
 	// calls that only make sense together (create a node, then attach its
@@ -779,6 +803,19 @@ void AIOSPipeline::_execute_call(const Dictionary &p_call) {
 		Dictionary envelope = AIOSJson::error("brief_required",
 				"Build tools are locked until you finish interviewing the human and call commit_brief. "
 				"Use ask_user for remaining questions, or commit_brief if you already have enough detail.",
+				details);
+		emit_signal("tool_completed", tool, false, envelope);
+		_push_result(id, envelope["error"], true);
+		return;
+	}
+
+	if (!AIOSToolRegistry::is_allowed_for_role(tool, mode)) {
+		Dictionary details;
+		details["tool"] = tool;
+		details["role"] = mode;
+		Dictionary envelope = AIOSJson::error("role_forbidden",
+				"Tool '" + tool + "' is not available in " + mode +
+						" mode. Switch role in the dock, or pick an allowed tool for this role.",
 				details);
 		emit_signal("tool_completed", tool, false, envelope);
 		_push_result(id, envelope["error"], true);
@@ -880,7 +917,9 @@ void AIOSPipeline::_execute_call(const Dictionary &p_call) {
 			return;
 		}
 		awaiting_playtest = true;
+		auto_playtest_inflight = false;
 		playtest_tool_use_id = id;
+		saved_since_last_playtest = false;
 		emit_signal("tool_completed", tool, true, launched);
 		return;
 	}
@@ -893,10 +932,50 @@ void AIOSPipeline::_execute_call(const Dictionary &p_call) {
 
 	if (ok) {
 		steps_executed++;
+		if (tool == "save_scene") {
+			batch_saved_scene = true;
+			saved_since_last_playtest = true;
+		}
 		_push_result(id, envelope["result"], false);
 	} else {
 		_push_result(id, envelope["error"], true);
 	}
+}
+
+bool AIOSPipeline::_maybe_launch_auto_playtest(bool p_finish_run_after) {
+	if (!auto_playtest || !saved_since_last_playtest || auto_playtest_inflight) {
+		return false;
+	}
+	if (!playtest.is_valid() || playtest->is_running()) {
+		return false;
+	}
+	if (is_clarifying()) {
+		return false;
+	}
+
+	Dictionary params;
+	params["quit_after_frames"] = 60;
+	params["timeout_sec"] = 30;
+	params["headless"] = true;
+
+	_set_stage(STAGE_PLAYTESTING, "auto_playtest smoke test after save_scene");
+	emit_signal("pipeline_log", "info",
+			"auto_playtest: launching a short smoke test (60 frames) because this batch saved the scene.");
+	Dictionary launched = playtest->start(params);
+	if (!(bool)launched["ok"]) {
+		emit_signal("pipeline_log", "warn",
+				"auto_playtest skipped: " + String(Dictionary(launched["error"])["message"]));
+		return false;
+	}
+
+	awaiting_playtest = true;
+	auto_playtest_inflight = true;
+	finish_after_auto_playtest = p_finish_run_after;
+	playtest_tool_use_id = "__auto_playtest__";
+	saved_since_last_playtest = false;
+	emit_signal("tool_invoked", "run_playtest", params);
+	emit_signal("tool_completed", "run_playtest", true, launched);
+	return true;
 }
 
 void AIOSPipeline::_push_result(const String &p_id, const Dictionary &p_payload, bool p_is_error) {
@@ -1010,6 +1089,12 @@ void AIOSPipeline::_finish_turn() {
 		}
 	}
 
+	// Observe: if the batch saved the scene and auto_playtest is on, smoke-test
+	// before handing control back to the model (or ending the run).
+	if (_maybe_launch_auto_playtest(pending_results.is_empty())) {
+		return;
+	}
+
 	if (pending_results.is_empty()) {
 		_set_stage(STAGE_IDLE, "done");
 		Dictionary summary;
@@ -1031,6 +1116,10 @@ void AIOSPipeline::_on_playtest_finished(const Dictionary &p_report) {
 		return; // A manual playtest, not one the pipeline asked for.
 	}
 	awaiting_playtest = false;
+	const bool was_auto = auto_playtest_inflight;
+	const bool finish_run = finish_after_auto_playtest;
+	auto_playtest_inflight = false;
+	finish_after_auto_playtest = false;
 
 	const String outcome = String(p_report["outcome"]);
 	const bool failed = outcome == "errors" || outcome == "crashed";
@@ -1038,15 +1127,23 @@ void AIOSPipeline::_on_playtest_finished(const Dictionary &p_report) {
 	emit_signal("pipeline_log", failed ? "error" : "success", String(p_report["summary"]));
 
 	// The report goes back as the tool result, formatted for a model rather
-	// than for a log viewer.
-	Dictionary block;
-	block["type"] = "tool_result";
-	block["tool_use_id"] = playtest_tool_use_id;
-	block["content"] = build_playtest_feedback(p_report);
-	if (failed) {
-		block["is_error"] = true;
+	// than for a log viewer. Auto playtests have no matching tool_use id, so
+	// they are fed as plain text feedback instead.
+	if (was_auto || playtest_tool_use_id == "__auto_playtest__") {
+		Dictionary block;
+		block["type"] = "text";
+		block["text"] = String(was_auto ? "[auto_playtest]\n" : "") + build_playtest_feedback(p_report);
+		pending_results.push_back(block);
+	} else {
+		Dictionary block;
+		block["type"] = "tool_result";
+		block["tool_use_id"] = playtest_tool_use_id;
+		block["content"] = build_playtest_feedback(p_report);
+		if (failed) {
+			block["is_error"] = true;
+		}
+		pending_results.push_back(block);
 	}
-	pending_results.push_back(block);
 
 	if (failed) {
 		repair_attempts++;
@@ -1075,6 +1172,19 @@ void AIOSPipeline::_on_playtest_finished(const Dictionary &p_report) {
 							" times in a row. Rollback is off (or failed), so the broken state was left on disk.");
 			return;
 		}
+	} else if (was_auto && finish_run && !failed) {
+		// Model already said it was done; the smoke test passed. End the run.
+		_set_stage(STAGE_IDLE, "done");
+		Dictionary summary;
+		summary["ok"] = true;
+		summary["steps_executed"] = steps_executed;
+		summary["filesystem_changed"] = steps_executed > 0;
+		summary["auto_playtest"] = "clean";
+		summary["message"] = "Run finished after " + String::num_int64(steps_executed) +
+				" step(s); auto_playtest passed.";
+		emit_signal("run_finished", summary);
+		pending_results.clear();
+		return;
 	}
 
 	// Anything the model queued behind the playtest runs now, against a scene

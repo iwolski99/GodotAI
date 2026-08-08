@@ -51,6 +51,9 @@ private:
 	double elapsed = 0.0;
 	double timeout_sec = 60.0;
 	uint64_t started_usec = 0;
+	// When set, a clean self-exit is expected (smoke test). Used to distinguish
+	// intentional quit_after_frames exits from silent native crashes.
+	int64_t quit_after_frames = 0;
 
 	Array diagnostics;
 	Array output_lines;

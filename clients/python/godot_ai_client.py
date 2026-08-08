@@ -330,6 +330,23 @@ class GodotAIClient:
             json.dumps({"type": "event", "event": "log", "data": {"level": level, "text": text}})
         )
 
+    def wait_playtest(self, timeout: float = 120.0) -> Dict[str, Any]:
+        """Block until the editor emits `playtest_finished`, then return its report.
+
+        Completes the Observe half of the loop for harnesses that call
+        `run_playtest` (which only acknowledges launch). Raises BridgeError on
+        timeout.
+        """
+        message = self._await(
+            lambda m: m.get("type") == "event" and m.get("event") == "playtest_finished",
+            timeout=timeout,
+        )
+        data = message.get("data") or {}
+        # Prefer the structured report when the plugin nests it; otherwise the
+        # event payload *is* the report.
+        report = data.get("report") if isinstance(data.get("report"), dict) else data
+        return report
+
 
 # --------------------------------------------------------------------------- #
 #  CLI                                                                         #
