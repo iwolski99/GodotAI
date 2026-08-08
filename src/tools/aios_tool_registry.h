@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "../playtest/aios_playtest.h"
 #include "../vcs/aios_git_checkpoint.h"
 #include "../world/aios_world_model.h"
 
@@ -22,6 +23,7 @@ class AIOSToolRegistry : public RefCounted {
 private:
 	Ref<AIOSWorldModel> world_model;
 	Ref<AIOSGitCheckpoint> git;
+	Ref<AIOSPlaytest> playtest;
 	Dictionary schema_cache;
 	bool auto_checkpoint = true;
 
@@ -31,7 +33,8 @@ protected:
 	static void _bind_methods();
 
 public:
-	void setup(const Ref<AIOSWorldModel> &p_world_model, const Ref<AIOSGitCheckpoint> &p_git);
+	void setup(const Ref<AIOSWorldModel> &p_world_model, const Ref<AIOSGitCheckpoint> &p_git,
+			const Ref<AIOSPlaytest> &p_playtest);
 
 	void set_auto_checkpoint(bool p_enabled) { auto_checkpoint = p_enabled; }
 	bool is_auto_checkpoint() const { return auto_checkpoint; }

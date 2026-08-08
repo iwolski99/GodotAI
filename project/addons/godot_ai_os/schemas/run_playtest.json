@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "run_playtest",
+  "title": "run_playtest",
+  "description": "Launches the project in a separate Godot process and captures everything it prints — engine warnings, script errors, and GDScript stack traces — as structured diagnostics. This is the Observe stage: it is the only tool that tells you whether the game actually works, as opposed to whether it merely loads. The call returns as soon as the child process is up; the report arrives afterwards (inline for the in-editor agent, as a 'playtest_finished' event for an IPC client). Save the scene first — the child process reads the project from disk, not from the editor's unsaved state.",
+  "mutating": false,
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {
+    "scene": {
+      "type": "string",
+      "pattern": "^res://.+",
+      "description": "Scene to run. Defaults to the project's configured main scene."
+    },
+    "timeout_sec": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 600,
+      "default": 60,
+      "description": "How long to let it run before killing it. A game with no exit condition will always hit this; that is reported as 'timeout', not as a failure."
+    },
+    "quit_after_frames": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Shut the game down after N rendered frames (Godot's --quit-after). Use this for a deterministic smoke test instead of relying on the timeout — 120 frames is roughly two seconds of gameplay."
+    },
+    "headless": {
+      "type": "boolean",
+      "default": false,
+      "description": "Run with no window (--headless). Faster and works without a display, but nothing is drawn, so rendering bugs are invisible. Off by default because a human watching an agent work usually wants to see the game."
+    }
+  },
+  "returns": {
+    "type": "object",
+    "description": "Immediate launch acknowledgement. The report follows separately.",
+    "properties": {
+      "scene": { "type": "string" },
+      "pid": { "type": "integer" },
+      "timeout_sec": { "type": "number" },
+      "log_file": { "type": "string", "description": "user:// path the child is writing its console output to." }
+    }
+  },
+  "report": {
+    "type": "object",
+    "description": "Delivered when the process exits.",
+    "properties": {
+      "outcome": {
+        "type": "string",
+        "enum": ["clean", "errors", "crashed", "timeout"],
+        "description": "clean = exited on its own with nothing logged; errors = ran but logged errors; crashed = non-zero exit; timeout = still running when the clock ran out."
+      },
+      "passed": { "type": "boolean", "description": "True only for 'clean'." },
+      "summary": { "type": "string" },
+      "scene": { "type": "string" },
+      "elapsed_sec": { "type": "number" },
+      "exit_code": { "type": "integer" },
+      "error_count": { "type": "integer" },
+      "warning_count": { "type": "integer" },
+      "diagnostics": {
+        "type": "array",
+        "description": "Parsed errors and warnings, each with its source location where Godot reported one.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "severity": { "type": "string", "enum": ["error", "warning"] },
+            "kind": { "type": "string", "description": "script_error, engine_error, warning, stack_frame, …" },
+            "message": { "type": "string" },
+            "file": { "type": "string" },
+            "line": { "type": "integer" },
+            "function": { "type": "string" }
+          }
+        }
+      },
+      "output_tail": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Last lines of console output. When something goes wrong, what was printed just before it is usually what explains it."
+      }
+    }
+  },
+  "errors": {
+    "already_running": "A playtest is in flight; stop it first.",
+    "no_scene": "No scene given and the project has no main scene configured.",
+    "scene_not_found": "No file at that path.",
+    "launch_failed": "The editor could not spawn a Godot process."
+  }
+}

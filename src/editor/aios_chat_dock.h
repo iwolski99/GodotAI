@@ -6,13 +6,17 @@
 #pragma once
 
 #include <godot_cpp/classes/button.hpp>
+#include <godot_cpp/classes/check_box.hpp>
 #include <godot_cpp/classes/control.hpp>
 #include <godot_cpp/classes/input_event.hpp>
 #include <godot_cpp/classes/label.hpp>
+#include <godot_cpp/classes/line_edit.hpp>
 #include <godot_cpp/classes/option_button.hpp>
 #include <godot_cpp/classes/panel_container.hpp>
 #include <godot_cpp/classes/rich_text_label.hpp>
+#include <godot_cpp/classes/spin_box.hpp>
 #include <godot_cpp/classes/text_edit.hpp>
+#include <godot_cpp/classes/v_box_container.hpp>
 
 using namespace godot;
 
@@ -51,12 +55,46 @@ private:
 	Button *rollback_button = nullptr;
 	Button *clear_button = nullptr;
 	Button *token_button = nullptr;
+	Button *settings_button = nullptr;
+
+	// --- settings panel ----------------------------------------------------
+	VBoxContainer *settings_panel = nullptr;
+	OptionButton *provider_selector = nullptr;
+	OptionButton *model_selector = nullptr;
+	LineEdit *model_custom = nullptr;
+	Button *models_refresh_button = nullptr;
+	LineEdit *api_key_field = nullptr;
+	Button *api_key_save_button = nullptr;
+	Button *api_key_clear_button = nullptr;
+	Label *api_key_status = nullptr;
+	CheckBox *thinking_toggle = nullptr;
+	CheckBox *show_thinking_toggle = nullptr;
+	OptionButton *effort_selector = nullptr;
+	SpinBox *max_tokens_field = nullptr;
 
 	State state = STATE_IDLE;
 	String session_token;
 	int message_count = 0;
 
+	// Set while set_settings() is writing widget values, so the change signals
+	// those writes fire do not bounce a "user changed a setting" event back at
+	// the plugin that just told us what the settings are.
+	bool applying_settings = false;
+
 	void _build_ui();
+	void _build_settings_panel(VBoxContainer *p_root);
+	void _emit_settings();
+	String _current_provider() const;
+
+	void _on_settings_toggled();
+	void _on_setting_changed(int p_unused);
+	void _on_setting_toggled(bool p_unused);
+	void _on_model_selected(int p_index);
+	void _on_model_custom_submitted(const String &p_text);
+	void _on_provider_selected(int p_index);
+	void _on_models_refresh_pressed();
+	void _on_api_key_save_pressed();
+	void _on_api_key_clear_pressed();
 	void _submit_prompt();
 	void _on_input_gui_input(const Ref<InputEvent> &p_event);
 	void _on_send_pressed();
@@ -93,6 +131,19 @@ public:
 	String get_state_name() const { return _state_name(state); }
 	void set_transport_info(bool p_running, const String &p_bind, int p_port, const String &p_mode, int p_clients);
 	void set_session_token(const String &p_token);
+
+	// --- settings ----------------------------------------------------------
+	// Push the authoritative configuration into the widgets. Does not emit.
+	void set_settings(const Dictionary &p_settings);
+	Dictionary get_settings() const;
+
+	// Replaces the model dropdown. p_models is [{id, name, context}]; the
+	// currently configured id is kept selectable even if the provider did not
+	// list it, because a model can be usable before it is advertised.
+	void set_model_list(const Array &p_models, const String &p_selected);
+
+	// Renders which key is in play without ever showing the key itself.
+	void set_key_status(const String &p_provider, bool p_has_key, const String &p_redacted, bool p_from_env);
 
 	String get_selected_mode() const;
 };

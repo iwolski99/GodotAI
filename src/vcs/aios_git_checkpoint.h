@@ -1,6 +1,6 @@
 /**************************************************************************/
 /*  aios_git_checkpoint.h                                                 */
-/*  Git-backed checkpoint / rollback for agent-driven edits.              */
+/*  Transactional git engine: snapshots, checkpoints, rollback.           */
 /**************************************************************************/
 
 #pragma once
@@ -12,22 +12,35 @@ using namespace godot;
 
 // Undo for an autonomous agent has to survive editor restarts, span both scene
 // files and generated scripts, and be inspectable by a human afterwards. Git
-// already does all of that, so instead of building a bespoke journal we commit
-// a checkpoint after every mutating tool call.
+// already does all of that, so every step of the pipeline is bracketed by
+// commits.
 //
-// Rollback is a `git revert`, never a `git reset --hard`: reverting is additive,
-// so an agent (or a bug in this plugin) can never destroy work the user had not
-// committed themselves. The cost is a slightly noisier history, which is the
-// right trade for an undo button an AI is allowed to press.
+// Two rollback modes, and the difference matters:
+//
+//   * reset_to_snapshot() — `git reset --hard <sha>`. Used by the pipeline when
+//     a step it just executed broke the project. This is only safe because a
+//     snapshot is taken *before* the step runs, so by construction there is no
+//     uncommitted work to destroy: everything the user had is already inside
+//     the snapshot commit we are resetting to.
+//
+//   * rollback_last() — `git revert`. Used by the human's Rollback button, where
+//     that guarantee does not hold. Reverting is additive, so it cannot destroy
+//     work the user never committed. The cost is a noisier history, which is the
+//     right trade for a button pressed with unknown state on disk.
+//
+// Mixing these up is the single most destructive bug this file could have, so
+// each method states which invariant it relies on.
 class AIOSGitCheckpoint : public RefCounted {
 	GDCLASS(AIOSGitCheckpoint, RefCounted)
 
 private:
 	String repo_path;
+	String git_executable;
 	bool enabled = true;
 	Array checkpoints; // Newest last. Entries: {sha, label, created_at}.
 
 	Dictionary _run_git(const PackedStringArray &p_args) const;
+	static String _resolve_git_executable();
 
 protected:
 	static void _bind_methods();
@@ -38,18 +51,28 @@ public:
 	void set_enabled(bool p_enabled) { enabled = p_enabled; }
 	bool is_enabled() const { return enabled; }
 
-	// True when the project directory is inside a git work tree and `git` is on
-	// PATH. Everything else in this class degrades to a clean error if not.
+	// True when the project directory is inside a git work tree and a git binary
+	// was found. Everything else here degrades to a clean error if not.
 	bool is_available() const;
-
 	bool has_changes() const;
 
-	// Commits everything currently in the work tree under an [ai-checkpoint]
-	// subject line. Returns {ok, result:{sha, label, created}} — created is
-	// false when there was nothing to commit.
-	Dictionary create_checkpoint(const String &p_label);
+	String get_git_executable() const { return git_executable; }
+	String get_head_sha() const;
 
-	// Reverts the most recent checkpoint this session created.
+	// --- transactional API (used by the pipeline) --------------------------
+	//
+	// Commits the current work tree and returns its SHA, whether or not there
+	// was anything new to commit — the caller needs a SHA to reset to either
+	// way. This is the "before" half of a transaction.
+	Dictionary create_snapshot(const String &p_label);
+
+	// HARD reset to a SHA taken from create_snapshot(). Destroys everything
+	// after it, which is safe only because create_snapshot() committed the work
+	// tree first. Never call this with a SHA from anywhere else.
+	Dictionary reset_to_snapshot(const String &p_sha);
+
+	// --- checkpoint API (used by tools and the dock) -----------------------
+	Dictionary create_checkpoint(const String &p_label);
 	Dictionary rollback_last();
 
 	Array list_checkpoints() const { return checkpoints; }

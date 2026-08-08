@@ -40,6 +40,15 @@ void AIOSChatDock::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("_on_rollback_pressed"), &AIOSChatDock::_on_rollback_pressed);
 	ClassDB::bind_method(D_METHOD("_on_clear_pressed"), &AIOSChatDock::_on_clear_pressed);
 	ClassDB::bind_method(D_METHOD("_on_token_pressed"), &AIOSChatDock::_on_token_pressed);
+	ClassDB::bind_method(D_METHOD("_on_settings_toggled"), &AIOSChatDock::_on_settings_toggled);
+	ClassDB::bind_method(D_METHOD("_on_setting_changed", "unused"), &AIOSChatDock::_on_setting_changed);
+	ClassDB::bind_method(D_METHOD("_on_setting_toggled", "unused"), &AIOSChatDock::_on_setting_toggled);
+	ClassDB::bind_method(D_METHOD("_on_model_selected", "index"), &AIOSChatDock::_on_model_selected);
+	ClassDB::bind_method(D_METHOD("_on_model_custom_submitted", "text"), &AIOSChatDock::_on_model_custom_submitted);
+	ClassDB::bind_method(D_METHOD("_on_provider_selected", "index"), &AIOSChatDock::_on_provider_selected);
+	ClassDB::bind_method(D_METHOD("_on_models_refresh_pressed"), &AIOSChatDock::_on_models_refresh_pressed);
+	ClassDB::bind_method(D_METHOD("_on_api_key_save_pressed"), &AIOSChatDock::_on_api_key_save_pressed);
+	ClassDB::bind_method(D_METHOD("_on_api_key_clear_pressed"), &AIOSChatDock::_on_api_key_clear_pressed);
 
 	ClassDB::bind_method(D_METHOD("append_user", "text"), &AIOSChatDock::append_user);
 	ClassDB::bind_method(D_METHOD("append_agent", "text"), &AIOSChatDock::append_agent);
@@ -52,12 +61,20 @@ void AIOSChatDock::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_state_name"), &AIOSChatDock::get_state_name);
 	ClassDB::bind_method(D_METHOD("set_transport_info", "running", "bind", "port", "mode", "clients"), &AIOSChatDock::set_transport_info);
 	ClassDB::bind_method(D_METHOD("set_session_token", "token"), &AIOSChatDock::set_session_token);
+	ClassDB::bind_method(D_METHOD("set_settings", "settings"), &AIOSChatDock::set_settings);
+	ClassDB::bind_method(D_METHOD("get_settings"), &AIOSChatDock::get_settings);
+	ClassDB::bind_method(D_METHOD("set_model_list", "models", "selected"), &AIOSChatDock::set_model_list);
+	ClassDB::bind_method(D_METHOD("set_key_status", "provider", "has_key", "redacted", "from_env"), &AIOSChatDock::set_key_status);
 	ClassDB::bind_method(D_METHOD("get_selected_mode"), &AIOSChatDock::get_selected_mode);
 
 	ADD_SIGNAL(MethodInfo("prompt_submitted", PropertyInfo(Variant::STRING, "text"), PropertyInfo(Variant::STRING, "mode")));
 	ADD_SIGNAL(MethodInfo("execute_plan_requested", PropertyInfo(Variant::STRING, "mode")));
 	ADD_SIGNAL(MethodInfo("stop_requested"));
 	ADD_SIGNAL(MethodInfo("rollback_requested"));
+	ADD_SIGNAL(MethodInfo("settings_changed", PropertyInfo(Variant::DICTIONARY, "settings")));
+	ADD_SIGNAL(MethodInfo("api_key_submitted", PropertyInfo(Variant::STRING, "provider"), PropertyInfo(Variant::STRING, "key")));
+	ADD_SIGNAL(MethodInfo("api_key_cleared", PropertyInfo(Variant::STRING, "provider")));
+	ADD_SIGNAL(MethodInfo("models_refresh_requested", PropertyInfo(Variant::STRING, "provider")));
 }
 
 /* -------------------------------------------------------------------------- */
@@ -90,6 +107,14 @@ void AIOSChatDock::_build_ui() {
 	detail_label->add_theme_color_override("font_color", COLOR_MUTED);
 	header->add_child(detail_label);
 
+	settings_button = memnew(Button);
+	settings_button->set_text("Settings");
+	settings_button->set_flat(true);
+	settings_button->set_toggle_mode(true);
+	settings_button->set_tooltip_text("Choose the model, reasoning depth and API key for the built-in agent.");
+	settings_button->connect("pressed", Callable(this, "_on_settings_toggled"));
+	header->add_child(settings_button);
+
 	token_button = memnew(Button);
 	token_button->set_text("token");
 	token_button->set_flat(true);
@@ -101,6 +126,11 @@ void AIOSChatDock::_build_ui() {
 	connection_label->set_text("offline");
 	connection_label->add_theme_color_override("font_color", COLOR_MUTED);
 	header->add_child(connection_label);
+
+	// --- settings ----------------------------------------------------------
+	// Collapsed by default: it is configured once and then never touched, so it
+	// should not be spending vertical space in a dock this narrow.
+	_build_settings_panel(root);
 
 	// --- history -----------------------------------------------------------
 	history = memnew(RichTextLabel);
@@ -163,6 +193,375 @@ void AIOSChatDock::_build_ui() {
 	clear_button->set_flat(true);
 	clear_button->connect("pressed", Callable(this, "_on_clear_pressed"));
 	actions->add_child(clear_button);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Settings panel                                                             */
+/* -------------------------------------------------------------------------- */
+
+// A dock is often left at its minimum width, and Godot's default control
+// minimums are wider than that: a label beside a field beside two buttons wants
+// more than 320px, and when an HBox cannot fit its children it shrinks all of
+// them -- including the labels, which then render as nothing at all.
+//
+// So the settings rows stack: caption above field, field full width. It costs
+// vertical space, which the panel has (it is collapsed by default and scrolls),
+// and it is the only layout that survives a narrow dock intact.
+static const int AIOS_FIELD_MIN_WIDTH = 40;
+
+static Label *make_caption(const String &p_text) {
+	Label *label = memnew(Label);
+	label->set_text(p_text);
+	label->add_theme_color_override("font_color", COLOR_MUTED);
+	label->add_theme_font_size_override("font_size", 11);
+	return label;
+}
+
+static void make_shrinkable(Control *p_control) {
+	p_control->set_custom_minimum_size(Vector2(AIOS_FIELD_MIN_WIDTH, 0));
+	p_control->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+	p_control->set_clip_contents(true);
+}
+
+void AIOSChatDock::_build_settings_panel(VBoxContainer *p_root) {
+	PanelContainer *frame = memnew(PanelContainer);
+	p_root->add_child(frame);
+	frame->set_visible(false);
+
+	settings_panel = memnew(VBoxContainer);
+	settings_panel->add_theme_constant_override("separation", 2);
+	frame->add_child(settings_panel);
+	// The frame is what gets shown and hidden; the panel is its only child, so
+	// toggling either works, but hiding the frame also hides its background.
+	settings_panel->set_meta("frame", frame);
+
+	// --- provider ----------------------------------------------------------
+	settings_panel->add_child(make_caption("Provider"));
+
+	provider_selector = memnew(OptionButton);
+	provider_selector->add_item("Anthropic", 0);
+	provider_selector->add_item("OpenRouter", 1);
+	provider_selector->select(0);
+	make_shrinkable(provider_selector);
+	provider_selector->set_tooltip_text("Anthropic talks to the Claude API directly. OpenRouter proxies hundreds of models, Claude included, behind one key.");
+	provider_selector->connect("item_selected", Callable(this, "_on_provider_selected"));
+	settings_panel->add_child(provider_selector);
+
+	// --- API key -----------------------------------------------------------
+	settings_panel->add_child(make_caption("API key"));
+
+	api_key_field = memnew(LineEdit);
+	api_key_field->set_secret(true);
+	api_key_field->set_placeholder("paste key, then Save");
+	make_shrinkable(api_key_field);
+	api_key_field->set_tooltip_text("Stored encrypted in user://, never inside the project folder. Setting the matching environment variable instead is safer still and takes priority.");
+	// unbind(1) drops the submitted text: the handler reads the field itself, and
+	// routing the key through a signal argument is one more place it could be
+	// logged by accident.
+	api_key_field->connect("text_submitted", Callable(this, "_on_api_key_save_pressed").unbind(1));
+	settings_panel->add_child(api_key_field);
+
+	HBoxContainer *key_buttons = memnew(HBoxContainer);
+	settings_panel->add_child(key_buttons);
+
+	api_key_save_button = memnew(Button);
+	api_key_save_button->set_text("Save key");
+	api_key_save_button->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+	api_key_save_button->set_tooltip_text("Store this key for the selected provider.");
+	api_key_save_button->connect("pressed", Callable(this, "_on_api_key_save_pressed"));
+	key_buttons->add_child(api_key_save_button);
+
+	api_key_clear_button = memnew(Button);
+	api_key_clear_button->set_text("Clear");
+	api_key_clear_button->set_flat(true);
+	api_key_clear_button->set_tooltip_text("Forget the stored key for this provider.");
+	api_key_clear_button->connect("pressed", Callable(this, "_on_api_key_clear_pressed"));
+	key_buttons->add_child(api_key_clear_button);
+
+	api_key_status = memnew(Label);
+	api_key_status->set_text("no key configured");
+	api_key_status->add_theme_color_override("font_color", COLOR_MUTED);
+	api_key_status->add_theme_font_size_override("font_size", 11);
+	// Wraps rather than truncates: this label carries the one warning a user
+	// must not miss (an environment variable overriding what they just saved).
+	api_key_status->set_autowrap_mode(TextServer::AUTOWRAP_WORD_SMART);
+	api_key_status->set_custom_minimum_size(Vector2(AIOS_FIELD_MIN_WIDTH, 0));
+	settings_panel->add_child(api_key_status);
+
+	// --- model -------------------------------------------------------------
+	settings_panel->add_child(make_caption("Model"));
+
+	model_selector = memnew(OptionButton);
+	make_shrinkable(model_selector);
+	model_selector->set_tooltip_text("Models the provider advertises. Press Refresh to fetch the current list.");
+	model_selector->connect("item_selected", Callable(this, "_on_model_selected"));
+	settings_panel->add_child(model_selector);
+
+	HBoxContainer *model_row = memnew(HBoxContainer);
+	settings_panel->add_child(model_row);
+
+	model_custom = memnew(LineEdit);
+	model_custom->set_placeholder("or type a model id, Enter");
+	model_custom->set_tooltip_text("For a model the provider has not listed yet. OpenRouter ids look like 'anthropic/claude-opus-4.1'.");
+	make_shrinkable(model_custom);
+	model_custom->connect("text_submitted", Callable(this, "_on_model_custom_submitted"));
+	model_row->add_child(model_custom);
+
+	models_refresh_button = memnew(Button);
+	models_refresh_button->set_text("Refresh");
+	models_refresh_button->set_tooltip_text("Ask the provider which models it currently offers.");
+	models_refresh_button->connect("pressed", Callable(this, "_on_models_refresh_pressed"));
+	model_row->add_child(models_refresh_button);
+
+	// --- reasoning ---------------------------------------------------------
+	settings_panel->add_child(make_caption("Reasoning"));
+
+	HBoxContainer *reasoning_row = memnew(HBoxContainer);
+	settings_panel->add_child(reasoning_row);
+
+	thinking_toggle = memnew(CheckBox);
+	thinking_toggle->set_text("Think");
+	thinking_toggle->set_pressed(true);
+	thinking_toggle->set_tooltip_text("Let the model reason before answering. Slower and more expensive, and much better at multi-step edits.");
+	thinking_toggle->connect("toggled", Callable(this, "_on_setting_toggled"));
+	reasoning_row->add_child(thinking_toggle);
+
+	show_thinking_toggle = memnew(CheckBox);
+	show_thinking_toggle->set_text("Show");
+	show_thinking_toggle->set_pressed(true);
+	show_thinking_toggle->set_tooltip_text("Print the reasoning in this dock. Turning it off does not stop the model reasoning, only reporting it.");
+	show_thinking_toggle->connect("toggled", Callable(this, "_on_setting_toggled"));
+	reasoning_row->add_child(show_thinking_toggle);
+
+	effort_selector = memnew(OptionButton);
+	effort_selector->add_item("low", 0);
+	effort_selector->add_item("medium", 1);
+	effort_selector->add_item("high", 2);
+	effort_selector->add_item("xhigh", 3);
+	effort_selector->add_item("max", 4);
+	effort_selector->select(2);
+	make_shrinkable(effort_selector);
+	effort_selector->set_tooltip_text("How hard the model thinks. Anthropic rejects thinking-off above 'high', so that combination is clamped for you.");
+	effort_selector->connect("item_selected", Callable(this, "_on_setting_changed"));
+	reasoning_row->add_child(effort_selector);
+
+	// --- budget ------------------------------------------------------------
+	settings_panel->add_child(make_caption("Max output tokens"));
+
+	max_tokens_field = memnew(SpinBox);
+	max_tokens_field->set_min(1024);
+	max_tokens_field->set_max(200000);
+	max_tokens_field->set_step(1024);
+	max_tokens_field->set_value(16384);
+	make_shrinkable(max_tokens_field);
+	max_tokens_field->set_tooltip_text("Ceiling for one reply. Reasoning tokens count against it, so leave headroom when effort is high.");
+	max_tokens_field->connect("value_changed", Callable(this, "_on_setting_changed"));
+	settings_panel->add_child(max_tokens_field);
+}
+
+String AIOSChatDock::_current_provider() const {
+	return provider_selector != nullptr && provider_selector->get_selected_id() == 1 ? String("openrouter") : String("anthropic");
+}
+
+Dictionary AIOSChatDock::get_settings() const {
+	Dictionary settings;
+	settings["provider"] = _current_provider();
+	settings["model"] = model_custom != nullptr && !model_custom->get_text().strip_edges().is_empty()
+			? model_custom->get_text().strip_edges()
+			: (model_selector != nullptr && model_selector->get_selected() >= 0
+							  ? String(model_selector->get_item_metadata(model_selector->get_selected()))
+							  : String());
+	settings["thinking_enabled"] = thinking_toggle != nullptr && thinking_toggle->is_pressed();
+	settings["show_thinking"] = show_thinking_toggle != nullptr && show_thinking_toggle->is_pressed();
+	settings["effort"] = effort_selector != nullptr ? effort_selector->get_item_text(effort_selector->get_selected()) : String("high");
+	settings["max_tokens"] = max_tokens_field != nullptr ? (int)max_tokens_field->get_value() : 16384;
+	return settings;
+}
+
+void AIOSChatDock::set_settings(const Dictionary &p_settings) {
+	applying_settings = true;
+
+	if (provider_selector != nullptr && p_settings.has("provider")) {
+		provider_selector->select(String(p_settings["provider"]) == "openrouter" ? 1 : 0);
+	}
+	if (thinking_toggle != nullptr && p_settings.has("thinking_enabled")) {
+		thinking_toggle->set_pressed((bool)p_settings["thinking_enabled"]);
+	}
+	if (show_thinking_toggle != nullptr && p_settings.has("show_thinking")) {
+		show_thinking_toggle->set_pressed((bool)p_settings["show_thinking"]);
+	}
+	if (effort_selector != nullptr && p_settings.has("effort")) {
+		const String effort = p_settings["effort"];
+		for (int i = 0; i < effort_selector->get_item_count(); i++) {
+			if (effort_selector->get_item_text(i) == effort) {
+				effort_selector->select(i);
+				break;
+			}
+		}
+	}
+	if (max_tokens_field != nullptr && p_settings.has("max_tokens")) {
+		max_tokens_field->set_value((double)(int64_t)p_settings["max_tokens"]);
+	}
+	if (p_settings.has("model")) {
+		set_model_list(Array(), String(p_settings["model"]));
+	}
+
+	applying_settings = false;
+}
+
+void AIOSChatDock::set_model_list(const Array &p_models, const String &p_selected) {
+	if (model_selector == nullptr) {
+		return;
+	}
+	const bool was_applying = applying_settings;
+	applying_settings = true;
+
+	// Preserve whatever is configured when the list is empty — an empty list is
+	// what "we have not fetched yet" and "the fetch failed" both look like, and
+	// wiping the selection in either case would silently unconfigure the agent.
+	String keep = p_selected;
+	if (keep.is_empty() && model_selector->get_selected() >= 0) {
+		keep = model_selector->get_item_metadata(model_selector->get_selected());
+	}
+
+	model_selector->clear();
+	bool found = false;
+	for (int i = 0; i < p_models.size(); i++) {
+		Dictionary m = p_models[i];
+		const String id = m.get("id", "");
+		if (id.is_empty()) {
+			continue;
+		}
+		String label = m.get("name", id);
+		const int context = (int)(int64_t)m.get("context", 0);
+		if (context > 0) {
+			label += " (" + String::num_int64(context / 1000) + "k)";
+		}
+		model_selector->add_item(label);
+		model_selector->set_item_metadata(model_selector->get_item_count() - 1, id);
+		if (id == keep) {
+			model_selector->select(model_selector->get_item_count() - 1);
+			found = true;
+		}
+	}
+
+	if (!found && !keep.is_empty()) {
+		// The configured model is not in the list. That is normal — a brand new
+		// model works before it is advertised — so it goes in as its own entry
+		// rather than being dropped.
+		model_selector->add_item(keep);
+		model_selector->set_item_metadata(model_selector->get_item_count() - 1, keep);
+		model_selector->select(model_selector->get_item_count() - 1);
+	}
+
+	if (model_custom != nullptr) {
+		model_custom->set_text("");
+	}
+	applying_settings = was_applying;
+}
+
+void AIOSChatDock::set_key_status(const String &p_provider, bool p_has_key, const String &p_redacted, bool p_from_env) {
+	if (api_key_status == nullptr) {
+		return;
+	}
+	if (!p_has_key) {
+		api_key_status->set_text("No key for " + p_provider + ". Paste one above, or set the environment variable.");
+		api_key_status->add_theme_color_override("font_color", COLOR_WARN);
+		return;
+	}
+	if (p_from_env) {
+		// Worth stating plainly: someone who pastes a key here while an
+		// environment variable is set will otherwise see no effect and conclude
+		// the plugin is broken.
+		api_key_status->set_text("Using " + p_provider + " key " + p_redacted + " from the environment. A saved key is ignored while that is set.");
+	} else {
+		api_key_status->set_text("Using saved " + p_provider + " key " + p_redacted + ".");
+	}
+	api_key_status->add_theme_color_override("font_color", COLOR_SUCCESS);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Settings events                                                            */
+/* -------------------------------------------------------------------------- */
+
+void AIOSChatDock::_emit_settings() {
+	if (applying_settings) {
+		return;
+	}
+	emit_signal("settings_changed", get_settings());
+}
+
+void AIOSChatDock::_on_settings_toggled() {
+	if (settings_panel == nullptr) {
+		return;
+	}
+	Object *frame = settings_panel->get_meta("frame");
+	Control *frame_control = Object::cast_to<Control>(frame);
+	if (frame_control != nullptr) {
+		frame_control->set_visible(settings_button->is_pressed());
+	}
+}
+
+void AIOSChatDock::_on_setting_changed(int p_unused) {
+	(void)p_unused;
+	_emit_settings();
+}
+
+void AIOSChatDock::_on_setting_toggled(bool p_unused) {
+	(void)p_unused;
+	_emit_settings();
+}
+
+void AIOSChatDock::_on_model_selected(int p_index) {
+	(void)p_index;
+	if (model_custom != nullptr) {
+		model_custom->set_text("");
+	}
+	_emit_settings();
+}
+
+void AIOSChatDock::_on_model_custom_submitted(const String &p_text) {
+	const String id = p_text.strip_edges();
+	if (id.is_empty()) {
+		return;
+	}
+	set_model_list(Array(), id);
+	_emit_settings();
+	append_log("info", "Model set to '" + id + "'.");
+}
+
+void AIOSChatDock::_on_provider_selected(int p_index) {
+	(void)p_index;
+	// Switching provider changes which key and which model ids are meaningful,
+	// so the plugin re-reads both; the dock only reports the change.
+	_emit_settings();
+}
+
+void AIOSChatDock::_on_models_refresh_pressed() {
+	emit_signal("models_refresh_requested", _current_provider());
+}
+
+void AIOSChatDock::_on_api_key_save_pressed() {
+	if (api_key_field == nullptr) {
+		return;
+	}
+	const String key = api_key_field->get_text().strip_edges();
+	if (key.is_empty()) {
+		append_log("warn", "Nothing to save: the key field is empty.");
+		return;
+	}
+	// Clear it from the widget immediately. A dock is a screenshot away from a
+	// bug report, and the field has no reason to keep holding the key once the
+	// plugin has it.
+	api_key_field->set_text("");
+	emit_signal("api_key_submitted", _current_provider(), key);
+}
+
+void AIOSChatDock::_on_api_key_clear_pressed() {
+	if (api_key_field != nullptr) {
+		api_key_field->set_text("");
+	}
+	emit_signal("api_key_cleared", _current_provider());
 }
 
 void AIOSChatDock::_notification(int p_what) {

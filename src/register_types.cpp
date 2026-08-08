@@ -5,10 +5,15 @@
 
 #include "register_types.h"
 
+#include "agent/aios_credentials.h"
+#include "agent/aios_llm_client.h"
 #include "editor/aios_chat_dock.h"
 #include "editor/aios_plugin.h"
 #include "ipc/aios_ipc_server.h"
+#include "pipeline/aios_pipeline.h"
+#include "playtest/aios_playtest.h"
 #include "tools/aios_tool_registry.h"
+#include "validate/aios_validator.h"
 #include "vcs/aios_git_checkpoint.h"
 #include "world/aios_world_model.h"
 
@@ -30,7 +35,12 @@ void initialize_ai_agent_os_module(ModuleInitializationLevel p_level) {
 	GDREGISTER_CLASS(AIOSIpcServer);
 	GDREGISTER_CLASS(AIOSWorldModel);
 	GDREGISTER_CLASS(AIOSGitCheckpoint);
+	GDREGISTER_CLASS(AIOSValidator);
+	GDREGISTER_CLASS(AIOSPlaytest);
 	GDREGISTER_CLASS(AIOSToolRegistry);
+	GDREGISTER_CLASS(AIOSCredentials);
+	GDREGISTER_CLASS(AIOSLlmClient);
+	GDREGISTER_CLASS(AIOSPipeline);
 	GDREGISTER_CLASS(AIOSChatDock);
 	GDREGISTER_CLASS(AIOSPlugin);
 

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "validate_scene",
+  "title": "validate_scene",
+  "description": "Sweeps the open scene for the damage a sequence of individually-valid edits can cause: NodePath properties pointing at nodes that no longer exist, resource references whose files are missing, scripts that fail to compile, and nodes with no owner (which vanish silently on save). Side-effect free. Cheaper than a playtest and catches a different class of problem — run it after a batch of edits and before you run the game.",
+  "mutating": false,
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {},
+  "returns": {
+    "type": "object",
+    "properties": {
+      "valid": { "type": "boolean", "description": "False if any finding has severity 'error'." },
+      "scene": { "type": "string" },
+      "nodes_checked": { "type": "integer" },
+      "findings": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "severity": { "type": "string", "enum": ["error", "warning", "info"] },
+            "code": {
+              "type": "string",
+              "enum": [
+                "dangling_node_path",
+                "missing_resource",
+                "missing_script_file",
+                "parse_error",
+                "node_without_owner",
+                "no_open_scene"
+              ]
+            },
+            "message": { "type": "string" },
+            "data": { "type": "object", "description": "Machine-readable context: node path, property name, target path." }
+          }
+        }
+      }
+    }
+  },
+  "notes": "With nothing open in the editor the call still succeeds: it returns valid with a single 'no_open_scene' info finding rather than an error envelope."
+}

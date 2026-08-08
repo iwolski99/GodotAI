@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "validate_change",
+  "title": "validate_change",
+  "description": "Runs a planned tool call through the static checker without executing it: GDScript is compiled in memory (nothing is written to disk), node paths are resolved against the open scene, and property bags are type-checked against the target class. Use it when you are unsure about a call you are about to make — a rejected call costs one round trip, while a bad executed call costs a playtest, a rollback, and a repair attempt. The pipeline already validates every call automatically, so this tool is for deliberate pre-flight checks, not routine use.",
+  "mutating": false,
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tool", "params"],
+  "properties": {
+    "tool": {
+      "type": "string",
+      "description": "Name of the tool whose call you want checked. Static checks exist for create_node_safe, attach_script_safe and safe_delete_node; any other name returns valid with no findings, because there is nothing to check statically."
+    },
+    "params": {
+      "type": "object",
+      "description": "The exact parameter object you would pass to that tool."
+    }
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "valid": { "type": "boolean", "description": "False if any finding has severity 'error'. The pipeline refuses to execute a call when this is false." },
+      "tool": { "type": "string" },
+      "findings": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "severity": { "type": "string", "enum": ["error", "warning", "info"] },
+            "code": {
+              "type": "string",
+              "description": "From the script checker: parse_error, empty_source, no_extends, incompatible_base, unresolved_base, compiler_unavailable, unresolved_node_reference. From the property checker: unknown_type, unknown_property, invalid_property_type. Checking a safe_delete_node call forwards that tool's own blocker and warning codes verbatim, so this list is not exhaustive."
+            },
+            "message": { "type": "string" },
+            "data": {
+              "type": "object",
+              "properties": {
+                "line": { "type": "integer" },
+                "property": { "type": "string" },
+                "expected": { "type": "string" },
+                "got": { "type": "string" },
+                "reference": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "notes": "Always succeeds — an unparseable script is a finding, not a tool error. Read 'valid', not 'ok'."
+}

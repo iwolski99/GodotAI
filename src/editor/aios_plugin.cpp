@@ -28,6 +28,24 @@
 #define SETTING_TOKEN "ai_agent_os/transport/require_token"
 #define SETTING_CHECKPOINT "ai_agent_os/vcs/auto_checkpoint"
 
+#define SETTING_PROVIDER "ai_agent_os/model/provider"
+#define SETTING_ANTHROPIC_MODEL "ai_agent_os/model/anthropic_model"
+#define SETTING_OPENROUTER_MODEL "ai_agent_os/model/openrouter_model"
+#define SETTING_THINKING "ai_agent_os/model/thinking_enabled"
+#define SETTING_SHOW_THINKING "ai_agent_os/model/show_thinking"
+#define SETTING_EFFORT "ai_agent_os/model/reasoning_effort"
+#define SETTING_MAX_TOKENS "ai_agent_os/model/max_output_tokens"
+
+#define SETTING_MAX_TURNS "ai_agent_os/agent/max_turns"
+#define SETTING_MAX_REPAIRS "ai_agent_os/agent/max_repair_attempts"
+#define SETTING_AUTO_PLAYTEST "ai_agent_os/agent/auto_playtest"
+#define SETTING_AUTO_ROLLBACK "ai_agent_os/agent/auto_rollback"
+
+// Effort is stored as an index so Project Settings can render it as a dropdown;
+// this is the mapping to the strings both APIs actually take.
+static const char *AIOS_EFFORT_NAMES[] = { "low", "medium", "high", "xhigh", "max" };
+static const int AIOS_EFFORT_COUNT = 5;
+
 void AIOSPlugin::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("_on_client_connected", "client_id", "remote"), &AIOSPlugin::_on_client_connected);
 	ClassDB::bind_method(D_METHOD("_on_client_disconnected", "client_id", "reason"), &AIOSPlugin::_on_client_disconnected);
@@ -39,6 +57,24 @@ void AIOSPlugin::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("_on_rollback_requested"), &AIOSPlugin::_on_rollback_requested);
 	ClassDB::bind_method(D_METHOD("_on_scene_changed", "root"), &AIOSPlugin::_on_scene_changed);
 	ClassDB::bind_method(D_METHOD("_on_scene_saved", "path"), &AIOSPlugin::_on_scene_saved);
+
+	ClassDB::bind_method(D_METHOD("_on_settings_changed", "settings"), &AIOSPlugin::_on_settings_changed);
+	ClassDB::bind_method(D_METHOD("_on_api_key_submitted", "provider", "key"), &AIOSPlugin::_on_api_key_submitted);
+	ClassDB::bind_method(D_METHOD("_on_api_key_cleared", "provider"), &AIOSPlugin::_on_api_key_cleared);
+	ClassDB::bind_method(D_METHOD("_on_models_refresh_requested", "provider"), &AIOSPlugin::_on_models_refresh_requested);
+	ClassDB::bind_method(D_METHOD("_on_models_listed", "models"), &AIOSPlugin::_on_models_listed);
+	ClassDB::bind_method(D_METHOD("_on_client_log", "level", "message"), &AIOSPlugin::_on_client_log);
+
+	ClassDB::bind_method(D_METHOD("_on_pipeline_stage_changed", "stage", "detail"), &AIOSPlugin::_on_pipeline_stage_changed);
+	ClassDB::bind_method(D_METHOD("_on_pipeline_message", "text"), &AIOSPlugin::_on_pipeline_message);
+	ClassDB::bind_method(D_METHOD("_on_pipeline_thinking", "text"), &AIOSPlugin::_on_pipeline_thinking);
+	ClassDB::bind_method(D_METHOD("_on_pipeline_log", "level", "message"), &AIOSPlugin::_on_pipeline_log);
+	ClassDB::bind_method(D_METHOD("_on_pipeline_tool_invoked", "tool", "params"), &AIOSPlugin::_on_pipeline_tool_invoked);
+	ClassDB::bind_method(D_METHOD("_on_pipeline_tool_completed", "tool", "ok", "envelope"), &AIOSPlugin::_on_pipeline_tool_completed);
+	ClassDB::bind_method(D_METHOD("_on_pipeline_run_finished", "summary"), &AIOSPlugin::_on_pipeline_run_finished);
+
+	ClassDB::bind_method(D_METHOD("_on_playtest_output", "stream", "line"), &AIOSPlugin::_on_playtest_output);
+	ClassDB::bind_method(D_METHOD("_on_playtest_finished", "report"), &AIOSPlugin::_on_playtest_finished);
 }
 
 String AIOSPlugin::_get_plugin_name() const {
@@ -76,6 +112,101 @@ void AIOSPlugin::_register_project_settings() {
 	_setting(SETTING_BIND, "127.0.0.1", Variant::STRING);
 	_setting(SETTING_TOKEN, true, Variant::BOOL);
 	_setting(SETTING_CHECKPOINT, true, Variant::BOOL);
+
+	// The two providers keep separate model settings on purpose: their model ids
+	// are not interchangeable ("claude-opus-5" vs "anthropic/claude-opus-4.1"),
+	// so sharing one field would break the configuration on every switch.
+	_setting(SETTING_PROVIDER, 0, Variant::INT, "Anthropic,OpenRouter");
+	_setting(SETTING_ANTHROPIC_MODEL, "claude-opus-5", Variant::STRING);
+	_setting(SETTING_OPENROUTER_MODEL, "anthropic/claude-opus-4.1", Variant::STRING);
+	_setting(SETTING_THINKING, true, Variant::BOOL);
+	_setting(SETTING_SHOW_THINKING, true, Variant::BOOL);
+	_setting(SETTING_EFFORT, 2, Variant::INT, "low,medium,high,xhigh,max");
+	_setting(SETTING_MAX_TOKENS, 16384, Variant::INT);
+
+	_setting(SETTING_MAX_TURNS, 24, Variant::INT);
+	_setting(SETTING_MAX_REPAIRS, 3, Variant::INT);
+	_setting(SETTING_AUTO_PLAYTEST, true, Variant::BOOL);
+	_setting(SETTING_AUTO_ROLLBACK, true, Variant::BOOL);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Model configuration                                                        */
+/* -------------------------------------------------------------------------- */
+
+Dictionary AIOSPlugin::_read_model_settings() const {
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	const bool openrouter = (int)(int64_t)ps->get_setting(SETTING_PROVIDER, 0) == 1;
+
+	int effort_index = (int)(int64_t)ps->get_setting(SETTING_EFFORT, 2);
+	if (effort_index < 0 || effort_index >= AIOS_EFFORT_COUNT) {
+		effort_index = 2;
+	}
+
+	Dictionary settings;
+	settings["provider"] = openrouter ? "openrouter" : "anthropic";
+	settings["model"] = ps->get_setting(openrouter ? SETTING_OPENROUTER_MODEL : SETTING_ANTHROPIC_MODEL, "");
+	settings["thinking_enabled"] = (bool)ps->get_setting(SETTING_THINKING, true);
+	settings["show_thinking"] = (bool)ps->get_setting(SETTING_SHOW_THINKING, true);
+	settings["effort"] = AIOS_EFFORT_NAMES[effort_index];
+	settings["max_tokens"] = (int)(int64_t)ps->get_setting(SETTING_MAX_TOKENS, 16384);
+	return settings;
+}
+
+void AIOSPlugin::_write_model_settings(const Dictionary &p_settings) {
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	const bool openrouter = String(p_settings.get("provider", "anthropic")) == "openrouter";
+
+	ps->set_setting(SETTING_PROVIDER, openrouter ? 1 : 0);
+
+	const String model = p_settings.get("model", "");
+	if (!model.is_empty()) {
+		ps->set_setting(openrouter ? SETTING_OPENROUTER_MODEL : SETTING_ANTHROPIC_MODEL, model);
+	}
+	ps->set_setting(SETTING_THINKING, (bool)p_settings.get("thinking_enabled", true));
+	ps->set_setting(SETTING_SHOW_THINKING, (bool)p_settings.get("show_thinking", true));
+
+	const String effort = p_settings.get("effort", "high");
+	for (int i = 0; i < AIOS_EFFORT_COUNT; i++) {
+		if (effort == AIOS_EFFORT_NAMES[i]) {
+			ps->set_setting(SETTING_EFFORT, i);
+			break;
+		}
+	}
+	ps->set_setting(SETTING_MAX_TOKENS, (int)(int64_t)p_settings.get("max_tokens", 16384));
+
+	// Persist immediately. Losing an API-key-adjacent configuration because the
+	// editor was closed the wrong way is a bad first impression.
+	ps->save();
+}
+
+void AIOSPlugin::_apply_model_settings() {
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	const Dictionary settings = _read_model_settings();
+
+	if (llm != nullptr) {
+		llm->set_config(settings);
+		llm->set_max_turns((int)(int64_t)ps->get_setting(SETTING_MAX_TURNS, 24));
+	}
+	if (pipeline.is_valid()) {
+		pipeline->set_max_repair_attempts((int)(int64_t)ps->get_setting(SETTING_MAX_REPAIRS, 3));
+		pipeline->set_auto_playtest((bool)ps->get_setting(SETTING_AUTO_PLAYTEST, true));
+		pipeline->set_auto_rollback((bool)ps->get_setting(SETTING_AUTO_ROLLBACK, true));
+	}
+	if (dock != nullptr) {
+		dock->set_settings(settings);
+	}
+	_refresh_key_status();
+}
+
+void AIOSPlugin::_refresh_key_status() {
+	if (dock == nullptr || credentials.is_null()) {
+		return;
+	}
+	const String provider = _read_model_settings().get("provider", "anthropic");
+	const String key = credentials->get_key(provider);
+	dock->set_key_status(provider, !key.is_empty(), AIOSCredentials::redact(key),
+			credentials->is_from_environment(provider));
 }
 
 String AIOSPlugin::_generate_token() const {
@@ -158,10 +289,23 @@ void AIOSPlugin::_enter_tree() {
 	world_model.instantiate();
 	git.instantiate();
 	git->set_enabled((bool)ProjectSettings::get_singleton()->get_setting(SETTING_CHECKPOINT, true));
+	playtest.instantiate();
 	registry.instantiate();
-	registry->setup(world_model, git);
+	registry->setup(world_model, git, playtest);
 	registry->set_auto_checkpoint((bool)ProjectSettings::get_singleton()->get_setting(SETTING_CHECKPOINT, true));
+	credentials.instantiate();
 	ipc.instantiate();
+
+	// The LLM client is a Node because HTTPRequest is: it needs a tree to
+	// process its own polling. Parenting it to the plugin means it lives and
+	// dies with the plugin without any extra bookkeeping.
+	llm = memnew(AIOSLlmClient);
+	llm->set_name("AIOSLlmClient");
+	add_child(llm);
+	llm->setup(credentials);
+
+	pipeline.instantiate();
+	pipeline->setup(registry, git, playtest, llm);
 
 	dock = memnew(AIOSChatDock);
 	add_control_to_dock(EditorPlugin::DOCK_SLOT_RIGHT_UL, dock);
@@ -170,6 +314,24 @@ void AIOSPlugin::_enter_tree() {
 	dock->connect("execute_plan_requested", Callable(this, "_on_execute_plan_requested"));
 	dock->connect("stop_requested", Callable(this, "_on_stop_requested"));
 	dock->connect("rollback_requested", Callable(this, "_on_rollback_requested"));
+	dock->connect("settings_changed", Callable(this, "_on_settings_changed"));
+	dock->connect("api_key_submitted", Callable(this, "_on_api_key_submitted"));
+	dock->connect("api_key_cleared", Callable(this, "_on_api_key_cleared"));
+	dock->connect("models_refresh_requested", Callable(this, "_on_models_refresh_requested"));
+
+	pipeline->connect("stage_changed", Callable(this, "_on_pipeline_stage_changed"));
+	pipeline->connect("agent_message", Callable(this, "_on_pipeline_message"));
+	pipeline->connect("agent_thinking", Callable(this, "_on_pipeline_thinking"));
+	pipeline->connect("pipeline_log", Callable(this, "_on_pipeline_log"));
+	pipeline->connect("tool_invoked", Callable(this, "_on_pipeline_tool_invoked"));
+	pipeline->connect("tool_completed", Callable(this, "_on_pipeline_tool_completed"));
+	pipeline->connect("run_finished", Callable(this, "_on_pipeline_run_finished"));
+
+	playtest->connect("playtest_output", Callable(this, "_on_playtest_output"));
+	playtest->connect("playtest_finished", Callable(this, "_on_playtest_finished"));
+
+	llm->connect("models_listed", Callable(this, "_on_models_listed"));
+	llm->connect("client_log", Callable(this, "_on_client_log"));
 
 	ipc->connect("client_connected", Callable(this, "_on_client_connected"));
 	ipc->connect("client_disconnected", Callable(this, "_on_client_disconnected"));
@@ -180,11 +342,35 @@ void AIOSPlugin::_enter_tree() {
 	connect("scene_saved", Callable(this, "_on_scene_saved"));
 
 	_start_transport();
+	_apply_model_settings();
+
+	if (llm->is_configured()) {
+		dock->append_log("info", "Built-in agent ready: " + llm->describe_target() + ". Type a goal and press Enter.");
+	} else {
+		dock->append_log("info", "No API key set yet. Open Settings in this dock to add one, or connect an external agent over the bridge.");
+	}
+
 	set_process(true);
 }
 
 void AIOSPlugin::_exit_tree() {
 	set_process(false);
+
+	// Stop the run before tearing anything down: the pipeline holds references
+	// to the registry and the playtest, and a playtest left running would
+	// outlive the editor as an orphaned process.
+	if (pipeline.is_valid()) {
+		pipeline->stop();
+	}
+	if (playtest.is_valid() && playtest->is_running()) {
+		playtest->stop();
+	}
+	if (llm != nullptr) {
+		llm->cancel();
+		remove_child(llm);
+		memdelete(llm);
+		llm = nullptr;
+	}
 
 	if (ipc.is_valid()) {
 		ipc->stop();
@@ -198,12 +384,22 @@ void AIOSPlugin::_exit_tree() {
 		dock = nullptr;
 	}
 
+	pipeline.unref();
 	registry.unref();
 	world_model.unref();
+	playtest.unref();
+	credentials.unref();
 	git.unref();
 }
 
 void AIOSPlugin::_process(double p_delta) {
+	// The pipeline drives the playtest tail from here, so it has to run before
+	// the early-out below — a playtest must keep being read even if the
+	// transport was never started.
+	if (pipeline.is_valid()) {
+		pipeline->poll(p_delta);
+	}
+
 	if (ipc.is_null()) {
 		return;
 	}
@@ -322,8 +518,22 @@ void AIOSPlugin::_handle_event(int p_client_id, const Dictionary &p_message) {
 /* -------------------------------------------------------------------------- */
 
 void AIOSPlugin::_on_prompt_submitted(const String &p_text, const String &p_mode) {
+	// The built-in agent takes precedence when it has a key: configuring one is
+	// a deliberate act, and silently routing the prompt to an external client
+	// instead would make that configuration look broken.
+	if (llm != nullptr && llm->is_configured()) {
+		Dictionary started = pipeline->start(p_text, p_mode);
+		if (!(bool)started["ok"]) {
+			Dictionary error = started["error"];
+			dock->append_log("error", String(error["message"]));
+		}
+		return;
+	}
+
 	if (ipc->get_client_count() == 0) {
-		dock->append_log("warn", "No agent is connected, so that prompt went nowhere. Start your agent client and try again.");
+		dock->append_log("warn",
+				"Nowhere to send that: no API key is configured for the built-in agent and no external "
+				"agent is connected. Open Settings in this dock to add a key.");
 		return;
 	}
 	Dictionary data;
@@ -342,6 +552,9 @@ void AIOSPlugin::_on_execute_plan_requested(const String &p_mode) {
 }
 
 void AIOSPlugin::_on_stop_requested() {
+	if (pipeline.is_valid()) {
+		pipeline->stop();
+	}
 	ipc->broadcast_event("stop", Dictionary());
 	dock->set_state_name("IDLE", "stopped by user");
 	dock->append_log("warn", "Stop requested. The agent should abandon its current step.");
@@ -393,5 +606,186 @@ void AIOSPlugin::_on_scene_saved(const String &p_path) {
 		Dictionary data;
 		data["path"] = p_path;
 		ipc->broadcast_event("scene_saved", data);
+	}
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Settings events                                                            */
+/* -------------------------------------------------------------------------- */
+
+void AIOSPlugin::_on_settings_changed(const Dictionary &p_settings) {
+	_write_model_settings(p_settings);
+	_apply_model_settings();
+
+	if (llm != nullptr) {
+		dock->append_log("info", "Agent target is now " + llm->describe_target() + ".");
+	}
+}
+
+void AIOSPlugin::_on_api_key_submitted(const String &p_provider, const String &p_key) {
+	if (credentials.is_null()) {
+		return;
+	}
+	if (credentials->set_key(p_provider, p_key) != OK) {
+		dock->append_log("error", "Could not write the credential store. The key was not saved.");
+		return;
+	}
+	// Never log the key. The redacted form is enough to confirm the right one
+	// landed, and this pane ends up in screenshots.
+	dock->append_log("success", "Saved " + p_provider + " key " + AIOSCredentials::redact(p_key) + ".");
+	_refresh_key_status();
+
+	if (llm != nullptr && llm->is_configured()) {
+		dock->append_log("info", "Built-in agent ready: " + llm->describe_target() + ".");
+	}
+}
+
+void AIOSPlugin::_on_api_key_cleared(const String &p_provider) {
+	if (credentials.is_null()) {
+		return;
+	}
+	credentials->clear_key(p_provider);
+	dock->append_log("info", "Cleared the stored " + p_provider + " key.");
+	_refresh_key_status();
+}
+
+void AIOSPlugin::_on_models_refresh_requested(const String &p_provider) {
+	if (llm == nullptr) {
+		return;
+	}
+	if (!credentials->has_key(p_provider)) {
+		dock->append_log("warn", "Cannot list models for " + p_provider + " without a key.");
+		return;
+	}
+	dock->append_log("info", "Fetching the model list from " + p_provider + "...");
+	if (llm->fetch_models() != OK) {
+		dock->append_log("error", "Could not start the model-list request.");
+	}
+}
+
+void AIOSPlugin::_on_models_listed(const Array &p_models) {
+	if (dock == nullptr) {
+		return;
+	}
+	const String current = _read_model_settings().get("model", "");
+	dock->set_model_list(p_models, current);
+	dock->append_log("success", vformat("%d models available.", p_models.size()));
+}
+
+void AIOSPlugin::_on_client_log(const String &p_level, const String &p_message) {
+	if (dock != nullptr) {
+		dock->append_log(p_level, p_message);
+	}
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Pipeline events                                                            */
+/* -------------------------------------------------------------------------- */
+
+// Everything the pipeline reports goes two places: the dock, so the human can
+// watch, and the IPC bridge, so an external tool can watch too. Neither is
+// authoritative — the pipeline is — which is why these handlers only forward.
+
+void AIOSPlugin::_on_pipeline_stage_changed(const String &p_stage, const String &p_detail) {
+	if (dock != nullptr) {
+		dock->set_state_name(p_stage, p_detail);
+	}
+	if (ipc.is_valid() && ipc->get_client_count() > 0) {
+		Dictionary data;
+		data["state"] = p_stage;
+		data["detail"] = p_detail;
+		ipc->broadcast_event("status", data);
+	}
+}
+
+void AIOSPlugin::_on_pipeline_message(const String &p_text) {
+	if (dock != nullptr) {
+		dock->append_agent(p_text);
+	}
+	if (ipc.is_valid() && ipc->get_client_count() > 0) {
+		Dictionary data;
+		data["text"] = p_text;
+		ipc->broadcast_event("agent_message", data);
+	}
+}
+
+void AIOSPlugin::_on_pipeline_thinking(const String &p_text) {
+	if (dock != nullptr) {
+		dock->append_thinking(p_text);
+	}
+}
+
+void AIOSPlugin::_on_pipeline_log(const String &p_level, const String &p_message) {
+	if (dock != nullptr) {
+		dock->append_log(p_level, p_message);
+	}
+}
+
+void AIOSPlugin::_on_pipeline_tool_invoked(const String &p_tool, const Dictionary &p_params) {
+	if (dock != nullptr) {
+		dock->append_tool_call(p_tool, p_params);
+	}
+}
+
+void AIOSPlugin::_on_pipeline_tool_completed(const String &p_tool, bool p_ok, const Dictionary &p_envelope) {
+	if (dock != nullptr) {
+		dock->append_tool_result(p_tool, p_ok, p_envelope);
+	}
+	if (p_ok && AIOSToolRegistry::is_mutating(p_tool) && ipc.is_valid() && ipc->get_client_count() > 0) {
+		Dictionary data;
+		data["revision"] = world_model->get_revision();
+		data["cause"] = p_tool;
+		ipc->broadcast_event("world_changed", data);
+	}
+}
+
+void AIOSPlugin::_on_pipeline_run_finished(const Dictionary &p_summary) {
+	const bool ok = (bool)p_summary.get("ok", false);
+	if (dock != nullptr) {
+		dock->append_log(ok ? "success" : "warn", String(p_summary.get("message", "Run finished.")));
+	}
+
+	// A run that touched the filesystem — a rollback, or scripts written to
+	// disk — leaves the editor's cached view stale until it rescans.
+	if ((bool)p_summary.get("filesystem_changed", false)) {
+		EditorInterface *ei = EditorInterface::get_singleton();
+		if (ei != nullptr && ei->get_resource_filesystem() != nullptr) {
+			ei->get_resource_filesystem()->scan();
+		}
+	}
+	if (world_model.is_valid()) {
+		world_model->invalidate();
+	}
+	if (ipc.is_valid() && ipc->get_client_count() > 0) {
+		ipc->broadcast_event("run_finished", p_summary);
+	}
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Playtest events                                                            */
+/* -------------------------------------------------------------------------- */
+
+void AIOSPlugin::_on_playtest_output(const String &p_stream, const String &p_line) {
+	if (dock != nullptr) {
+		dock->append_log(p_stream == "stderr" ? "error" : "info", p_line);
+	}
+	if (ipc.is_valid() && ipc->get_client_count() > 0) {
+		Dictionary data;
+		data["stream"] = p_stream;
+		data["text"] = p_line;
+		ipc->broadcast_event("runtime_log", data);
+	}
+}
+
+void AIOSPlugin::_on_playtest_finished(const Dictionary &p_report) {
+	const String outcome = p_report.get("outcome", "none");
+	if (dock != nullptr) {
+		dock->append_log(outcome == "clean" ? "success" : "warn", String(p_report.get("summary", "")));
+	}
+	// The pipeline listens to this signal directly; the broadcast is for
+	// external agents, which have no other way to learn the result of a
+	// run_playtest they started over the bridge.
+	if (ipc.is_valid() && ipc->get_client_count() > 0) {
+		ipc->broadcast_event("playtest_finished", p_report);
 	}
 }

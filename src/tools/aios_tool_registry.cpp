@@ -5,6 +5,7 @@
 #include "aios_tool_registry.h"
 
 #include "../util/aios_json.h"
+#include "../validate/aios_validator.h"
 #include "aios_scene_tools.h"
 
 #include <godot_cpp/classes/file_access.hpp>
@@ -30,6 +31,9 @@ static const ToolInfo TOOL_TABLE[] = {
 	{ "safe_delete_node", "Delete a node after auditing children, signals, NodePath properties and script references.", true },
 	{ "save_scene", "Persist the open scene to disk (required before checkpoints can capture scene edits).", true },
 	{ "open_scene", "Switch the editor to another scene so the other tools act on it.", false },
+	{ "validate_change", "Dry-run a planned tool call through the static checker without executing it.", false },
+	{ "validate_scene", "Sweep the open scene for dangling NodePaths, missing resources and broken scripts.", false },
+	{ "run_playtest", "Launch the game in a child process and return its runtime errors and stack traces.", false },
 	{ "create_checkpoint", "Commit the current project state as a rollback point.", true },
 	{ "rollback_last", "Revert the most recent checkpoint.", true },
 	{ "list_tools", "This manifest, including the JSON schema of every tool.", false },
@@ -52,9 +56,11 @@ void AIOSToolRegistry::_bind_methods() {
 			PropertyInfo(Variant::DICTIONARY, "envelope")));
 }
 
-void AIOSToolRegistry::setup(const Ref<AIOSWorldModel> &p_world_model, const Ref<AIOSGitCheckpoint> &p_git) {
+void AIOSToolRegistry::setup(const Ref<AIOSWorldModel> &p_world_model, const Ref<AIOSGitCheckpoint> &p_git,
+		const Ref<AIOSPlaytest> &p_playtest) {
 	world_model = p_world_model;
 	git = p_git;
+	playtest = p_playtest;
 }
 
 bool AIOSToolRegistry::is_mutating(const String &p_tool) {
@@ -149,6 +155,19 @@ Dictionary AIOSToolRegistry::call_tool(const String &p_tool, const Dictionary &p
 		envelope = AIOSSceneTools::save_scene(p_params);
 	} else if (p_tool == "open_scene") {
 		envelope = AIOSSceneTools::open_scene(p_params);
+	} else if (p_tool == "validate_change") {
+		envelope = AIOSValidator::validate_planned_call(
+				AIOSJson::get_string(p_params, "tool", ""),
+				AIOSJson::get_dict(p_params, "params"));
+	} else if (p_tool == "validate_scene") {
+		envelope = AIOSValidator::validate_scene();
+	} else if (p_tool == "run_playtest") {
+		// Asynchronous by nature: this returns as soon as the child process is
+		// up, and the report is delivered later as a `playtest_finished` event.
+		// The in-editor pipeline intercepts this tool before dispatch so it can
+		// await the report inline; an external agent over IPC gets the event.
+		envelope = playtest.is_valid() ? playtest->start(p_params)
+									   : AIOSJson::error("not_initialised", "Playtesting is unavailable.");
 	} else if (p_tool == "create_checkpoint") {
 		envelope = git.is_valid() ? git->create_checkpoint(AIOSJson::get_string(p_params, "label", "manual checkpoint"))
 								  : AIOSJson::error("not_initialised", "Checkpointing is unavailable.");

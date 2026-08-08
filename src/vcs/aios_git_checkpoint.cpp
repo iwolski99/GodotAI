@@ -17,6 +17,62 @@ AIOSGitCheckpoint::AIOSGitCheckpoint() {
 	if (repo_path.ends_with("/")) {
 		repo_path = repo_path.substr(0, repo_path.length() - 1);
 	}
+	git_executable = _resolve_git_executable();
+}
+
+// Finding git is a Windows problem. On Linux and macOS it is on PATH or it is
+// not installed; on Windows, Godot launched from the Start menu or Steam
+// inherits a PATH that frequently lacks Git for Windows even though the user
+// has it, so a bare "git" fails for someone who is looking straight at a git
+// repository. Probing the standard install locations turns a confusing
+// "checkpoints unavailable" into a working feature.
+String AIOSGitCheckpoint::_resolve_git_executable() {
+	OS *os = OS::get_singleton();
+
+	// An explicit override wins over everything — the escape hatch for portable
+	// installs and for anyone running a wrapper.
+	const String env_override = os->get_environment("GODOT_AI_OS_GIT");
+	if (!env_override.is_empty()) {
+		return env_override;
+	}
+
+	PackedStringArray probe;
+	probe.push_back("--version");
+	Array discard;
+	if (os->execute("git", probe, discard, false) == 0) {
+		return "git";
+	}
+
+	if (os->get_name() != "Windows") {
+		// Nothing else to try; report "git" so the error message names the
+		// command the user is expected to install.
+		return "git";
+	}
+
+	PackedStringArray candidates;
+	const String program_files = os->get_environment("ProgramFiles");
+	const String program_files_x86 = os->get_environment("ProgramFiles(x86)");
+	const String local_app_data = os->get_environment("LOCALAPPDATA");
+	if (!program_files.is_empty()) {
+		candidates.push_back(program_files.replace("\\", "/") + "/Git/cmd/git.exe");
+	}
+	if (!program_files_x86.is_empty()) {
+		candidates.push_back(program_files_x86.replace("\\", "/") + "/Git/cmd/git.exe");
+	}
+	if (!local_app_data.is_empty()) {
+		// Git for Windows' per-user install, and GitHub Desktop's bundled copy.
+		candidates.push_back(local_app_data.replace("\\", "/") + "/Programs/Git/cmd/git.exe");
+		candidates.push_back(local_app_data.replace("\\", "/") + "/GitHubDesktop/app/resources/app/git/cmd/git.exe");
+	}
+	candidates.push_back("C:/Program Files/Git/cmd/git.exe");
+
+	for (int i = 0; i < candidates.size(); i++) {
+		Array probe_output;
+		if (os->execute(candidates[i], probe, probe_output, false) == 0) {
+			return candidates[i];
+		}
+	}
+	return "git";
 }
 
 void AIOSGitCheckpoint::_bind_methods() {
@@ -24,6 +80,10 @@ void AIOSGitCheckpoint::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("is_enabled"), &AIOSGitCheckpoint::is_enabled);
 	ClassDB::bind_method(D_METHOD("is_available"), &AIOSGitCheckpoint::is_available);
 	ClassDB::bind_method(D_METHOD("has_changes"), &AIOSGitCheckpoint::has_changes);
+	ClassDB::bind_method(D_METHOD("get_git_executable"), &AIOSGitCheckpoint::get_git_executable);
+	ClassDB::bind_method(D_METHOD("get_head_sha"), &AIOSGitCheckpoint::get_head_sha);
+	ClassDB::bind_method(D_METHOD("create_snapshot", "label"), &AIOSGitCheckpoint::create_snapshot);
+	ClassDB::bind_method(D_METHOD("reset_to_snapshot", "sha"), &AIOSGitCheckpoint::reset_to_snapshot);
 	ClassDB::bind_method(D_METHOD("create_checkpoint", "label"), &AIOSGitCheckpoint::create_checkpoint);
 	ClassDB::bind_method(D_METHOD("rollback_last"), &AIOSGitCheckpoint::rollback_last);
 	ClassDB::bind_method(D_METHOD("list_checkpoints"), &AIOSGitCheckpoint::list_checkpoints);
@@ -31,6 +91,8 @@ void AIOSGitCheckpoint::_bind_methods() {
 
 	ADD_SIGNAL(MethodInfo("checkpoint_created", PropertyInfo(Variant::STRING, "sha"), PropertyInfo(Variant::STRING, "label")));
 	ADD_SIGNAL(MethodInfo("rolled_back", PropertyInfo(Variant::STRING, "sha"), PropertyInfo(Variant::STRING, "label")));
+	ADD_SIGNAL(MethodInfo("snapshot_created", PropertyInfo(Variant::STRING, "sha"), PropertyInfo(Variant::STRING, "label")));
+	ADD_SIGNAL(MethodInfo("reset_performed", PropertyInfo(Variant::STRING, "sha")));
 }
 
 Dictionary AIOSGitCheckpoint::_run_git(const PackedStringArray &p_args) const {
@@ -42,7 +104,9 @@ Dictionary AIOSGitCheckpoint::_run_git(const PackedStringArray &p_args) const {
 	args.append_array(p_args);
 
 	Array output;
-	const int exit_code = (int)OS::get_singleton()->execute("git", args, output, true);
+	// open_console=false matters on Windows: the default would flash a console
+	// window on every single git call the pipeline makes.
+	const int exit_code = (int)OS::get_singleton()->execute(git_executable, args, output, true, false);
 
 	String text;
 	for (int i = 0; i < output.size(); i++) {
@@ -93,13 +157,126 @@ Dictionary AIOSGitCheckpoint::get_status() const {
 	return d;
 }
 
+String AIOSGitCheckpoint::get_head_sha() const {
+	PackedStringArray args;
+	args.push_back("rev-parse");
+	args.push_back("HEAD");
+	Dictionary res = _run_git(args);
+	return (bool)res["ok"] ? String(res["output"]).strip_edges() : String();
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Transactional API                                                          */
+/* -------------------------------------------------------------------------- */
+
+Dictionary AIOSGitCheckpoint::create_snapshot(const String &p_label) {
+	if (!is_available()) {
+		return AIOSJson::error("git_unavailable",
+				"No git work tree at " + repo_path + ". The pipeline needs one: without a snapshot to reset to, "
+				"a failed step cannot be undone, so execution is refused rather than risking your project.");
+	}
+
+	// Commit whatever is on disk, so the returned SHA is a complete picture of
+	// the project. This is the invariant reset_to_snapshot() depends on: after
+	// this call there is nothing uncommitted left for a hard reset to destroy.
+	if (has_changes()) {
+		PackedStringArray add_args;
+		add_args.push_back("add");
+		add_args.push_back("-A");
+		Dictionary added = _run_git(add_args);
+		if (!(bool)added["ok"]) {
+			return AIOSJson::error("git_add_failed", String(added["output"]));
+		}
+
+		PackedStringArray commit_args;
+		commit_args.push_back("commit");
+		commit_args.push_back("--no-verify");
+		commit_args.push_back("--no-gpg-sign");
+		commit_args.push_back("-m");
+		commit_args.push_back("[ai-snapshot] " + (p_label.is_empty() ? String("before agent step") : p_label));
+		Dictionary committed = _run_git(commit_args);
+		if (!(bool)committed["ok"]) {
+			return AIOSJson::error("git_commit_failed", String(committed["output"]));
+		}
+	}
+
+	const String sha = get_head_sha();
+	if (sha.is_empty()) {
+		// A repository with no commits at all has no HEAD to snapshot, and
+		// `reset --hard` would have nothing to aim at.
+		return AIOSJson::error("no_commits",
+				"The repository has no commits yet, so there is no state to roll back to. "
+				"Make an initial commit before letting the agent run.");
+	}
+
+	emit_signal("snapshot_created", sha, p_label);
+
+	Dictionary result;
+	result["sha"] = sha;
+	result["short_sha"] = sha.substr(0, 8);
+	result["label"] = p_label;
+	result["created_at"] = Time::get_singleton()->get_unix_time_from_system();
+	return AIOSJson::ok(result);
+}
+
+Dictionary AIOSGitCheckpoint::reset_to_snapshot(const String &p_sha) {
+	if (!is_available()) {
+		return AIOSJson::error("git_unavailable", "No git work tree at " + repo_path + ".");
+	}
+	if (p_sha.strip_edges().is_empty()) {
+		return AIOSJson::error("missing_parameter", "A snapshot SHA is required.");
+	}
+
+	// Refuse a SHA that is not an ancestor of HEAD. A caller passing something
+	// from elsewhere — a stale variable, a hand-typed hash — would otherwise
+	// silently discard unrelated history, and a hard reset is not recoverable
+	// through this plugin.
+	PackedStringArray verify;
+	verify.push_back("merge-base");
+	verify.push_back("--is-ancestor");
+	verify.push_back(p_sha);
+	verify.push_back("HEAD");
+	Dictionary verified = _run_git(verify);
+	if (!(bool)verified["ok"]) {
+		return AIOSJson::error("not_an_ancestor",
+				"'" + p_sha.substr(0, 8) + "' is not an ancestor of HEAD, so resetting to it would discard unrelated "
+				"history. Refusing. Snapshots must come from create_snapshot() in this session.");
+	}
+
+	PackedStringArray args;
+	args.push_back("reset");
+	args.push_back("--hard");
+	args.push_back(p_sha);
+	Dictionary res = _run_git(args);
+	if (!(bool)res["ok"]) {
+		return AIOSJson::error("reset_failed", String(res["output"]));
+	}
+
+	// Untracked files a failed step left behind survive a reset, and a stray
+	// half-written .gd is exactly what breaks the next run. Clean them, but
+	// never touch ignored files (.godot/ holds the import cache and the session
+	// token; wiping it would force a full reimport).
+	PackedStringArray clean_args;
+	clean_args.push_back("clean");
+	clean_args.push_back("-fd");
+	_run_git(clean_args);
+
+	emit_signal("reset_performed", p_sha);
+
+	Dictionary result;
+	result["sha"] = p_sha;
+	result["short_sha"] = p_sha.substr(0, 8);
+	result["note"] = "Working tree reset on disk. Reopen the scene in the editor to load the restored version.";
+	return AIOSJson::ok(result);
+}
+
 Dictionary AIOSGitCheckpoint::create_checkpoint(const String &p_label) {
 	if (!enabled) {
 		return AIOSJson::error("checkpoints_disabled", "Automatic checkpoints are turned off in Project Settings (ai_agent_os/vcs/auto_checkpoint).");
 	}
 	if (!is_available()) {
 		return AIOSJson::error("git_unavailable",
-				"No git work tree at " + repo_path + ". Run `git init` in the project folder to enable checkpoints and rollback.");
+				"No git work tree at " + repo_path + " (using '" + git_executable + "'). Run `git init` in the project folder to enable checkpoints and rollback.");
 	}
 	if (!has_changes()) {
 		Dictionary result;
