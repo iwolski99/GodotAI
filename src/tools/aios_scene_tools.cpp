@@ -1831,7 +1831,7 @@ Dictionary AIOSSceneTools::import_asset(const Dictionary &p_params) {
 			Dictionary result;
 			result["dry_run"] = true;
 			result["would_create_dir"] = dest_dir;
-			result["would_copy"] = source + " -> " + dest;
+			result["would_copy"] = source + String(" -> ") + dest;
 			return AIOSJson::ok(result);
 		}
 		const Error mk = DirAccess::make_dir_recursive_absolute(dest_dir);
@@ -1843,7 +1843,7 @@ Dictionary AIOSSceneTools::import_asset(const Dictionary &p_params) {
 	if (dry_run) {
 		Dictionary result;
 		result["dry_run"] = true;
-		result["would_copy"] = source + " -> " + dest;
+		result["would_copy"] = source + String(" -> ") + dest;
 		result["note"] = "Godot will import the file on the next filesystem scan.";
 		return AIOSJson::ok(result);
 	}
@@ -1858,9 +1858,9 @@ Dictionary AIOSSceneTools::import_asset(const Dictionary &p_params) {
 		return AIOSJson::error("copy_failed", "Could not copy '" + source + "' to '" + dest + "'.");
 	}
 
-	EditorFileSystem *efs = EditorFileSystem::get_singleton();
-	if (efs != nullptr) {
-		efs->update_file(dest);
+	EditorInterface *ei = EditorInterface::get_singleton();
+	if (ei != nullptr && ei->get_resource_filesystem() != nullptr) {
+		ei->get_resource_filesystem()->update_file(dest);
 	}
 
 	Dictionary result;

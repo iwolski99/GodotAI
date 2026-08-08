@@ -5,6 +5,7 @@
 
 #include "register_types.h"
 
+#include "agent/aios_agent_memory.h"
 #include "agent/aios_credentials.h"
 #include "assets/aios_asset_pipeline.h"
 #include "assets/aios_blender_bridge.h"
@@ -45,6 +46,7 @@ void initialize_ai_agent_os_module(ModuleInitializationLevel p_level) {
 	GDREGISTER_CLASS(AIOSBlenderBridge);
 	GDREGISTER_CLASS(AIOSToolRegistry);
 	GDREGISTER_CLASS(AIOSCredentials);
+	GDREGISTER_CLASS(AIOSAgentMemory);
 	GDREGISTER_CLASS(AIOSLlmClient);
 	GDREGISTER_CLASS(AIOSPipeline);
 	GDREGISTER_CLASS(AIOSChatDock);

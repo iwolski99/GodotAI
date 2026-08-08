@@ -415,7 +415,7 @@ String AIOSPipeline::build_system_prompt(const String &p_mode, bool p_git_availa
 			"reading a log file.\n\n";
 
 	if (!p_memory_block.is_empty()) {
-		prompt += p_memory_block + "\n";
+		prompt += p_memory_block + String("\n");
 	}
 
 	// Mode is the one thing that changes what the agent is *for*. Keeping the
@@ -897,7 +897,7 @@ void AIOSPipeline::_execute_call(const Dictionary &p_call) {
 
 	// Role gate for built-in agent modes.
 	if (!AIOSToolRegistry::is_allowed_for_role(tool, mode)) {
-		_set_stage(STAGE_REPAIRING, tool + " forbidden for " + mode + " mode");
+		_set_stage(STAGE_REPAIRING, tool + String(" forbidden for ") + mode + String(" mode"));
 		Dictionary details;
 		details["role"] = mode;
 		details["tool"] = tool;

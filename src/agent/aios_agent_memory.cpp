@@ -31,14 +31,14 @@ AIOSAgentMemory::AIOSAgentMemory() {
 	memory_path = AIOS_MEMORY_FILE;
 }
 
-void AIOSAgentMemory::_ensure_loaded() {
+void AIOSAgentMemory::_ensure_loaded() const {
 	if (!data.is_empty()) {
 		return;
 	}
 	load();
 }
 
-void AIOSAgentMemory::load() {
+void AIOSAgentMemory::load() const {
 	data.clear();
 	if (!FileAccess::file_exists(memory_path)) {
 		data["conventions"] = Array();

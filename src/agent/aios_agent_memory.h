@@ -20,9 +20,11 @@ class AIOSAgentMemory : public RefCounted {
 
 private:
 	String memory_path;
-	Dictionary data;
+	// mutable: format_for_prompt() is const (it's called from const contexts
+	// while building a prompt) but still needs to lazy-load on first use.
+	mutable Dictionary data;
 
-	void _ensure_loaded();
+	void _ensure_loaded() const;
 	bool _save() const;
 
 protected:
@@ -31,7 +33,7 @@ protected:
 public:
 	AIOSAgentMemory();
 
-	void load();
+	void load() const;
 	Dictionary get_data() const { return data; }
 
 	// Rendered block for injection into the system prompt. Empty when new.
