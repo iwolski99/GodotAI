@@ -1,9 +1,21 @@
 # Connecting an agent
 
-The plugin does not talk to any model. It exposes tools and a message bus; your
-agent harness supplies the intelligence. That split is deliberate — it means the
-plugin works with whatever you already use, and does not go stale when a new
-model ships.
+There are two ways to drive this plugin, and they are equally supported.
+
+**The built-in agent.** Add an API key in the dock's Settings panel and type a
+goal. The plugin runs the whole
+[Plan → Validate → Execute → Observe → Repair](PIPELINE.md) loop itself, against
+Anthropic or OpenRouter. Nothing to write. See
+[SETUP.md §5](SETUP.md#5-configure-the-built-in-agent).
+
+**Your own harness over the bridge.** The plugin exposes tools and a message bus;
+you supply the intelligence. This is what the rest of this document covers. Use
+it when you already have a harness, when you want a model or provider the
+built-in client does not speak, or when the agent needs to do things outside
+Godot as well.
+
+Both reach the project through the same tool registry and receive the same
+manifest, so neither is a second-class path.
 
 ---
 
@@ -199,3 +211,45 @@ Turn it on for the specific query where you need it, not globally.
 **A failed `attach_script_safe` deletes the file it created.** This is
 intentional — a `.gd` that does not parse poisons the project's script cache.
 Fix the source and call again.
+
+---
+
+## Borrowing the built-in agent's prompt
+
+The system prompt the in-editor pipeline uses is assembled in
+`AIOSPipeline::build_system_prompt()`, and it is worth reading even if you are
+writing your own — [PIPELINE.md](PIPELINE.md#the-system-prompt) explains the
+reasoning.
+
+The part most harnesses get wrong is telling the model what happens *around* its
+tool calls. A model that does not know a validation gate exists treats a rejection
+as a mysterious failure and starts guessing. A model that knows treats it as
+review and corrects the call. One paragraph is enough:
+
+> Every tool call you make goes through a fixed pipeline: it is validated
+> statically, then executed, then the scene is re-checked, and the result comes
+> back to you. A call that fails validation is NOT executed — you get the findings
+> and a chance to correct it, and the project is untouched.
+
+If your harness implements its own rollback, say so too, and say it plainly:
+
+> Before each batch of changes the pipeline takes a git snapshot. If your changes
+> break the project, it resets to that snapshot and tells you. Rollback is real:
+> your edits genuinely disappear. Retrying the same thing after a rollback wastes
+> a cycle.
+
+And when the project is *not* a git repository, invert it rather than omitting it
+— an agent that assumes an undo it does not have takes bigger swings than it
+should:
+
+> This project is NOT a git repository, so there is no rollback. Every change you
+> make is permanent. Prefer `dry_run` first, and prefer small reversible steps
+> over large ones.
+
+### Feeding failures back
+
+When a validation or playtest failure goes back to the model, send the specific
+finding, its location, and what you did about it — not a summary.
+[PIPELINE.md](PIPELINE.md#the-prompt-wrapper) has the three exact templates the
+built-in agent uses; they are short, and copying them is faster than rediscovering
+why `"validation failed"` on its own produces a guess instead of a fix.

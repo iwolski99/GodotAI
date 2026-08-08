@@ -1,26 +1,32 @@
 # Godot AI Agent OS
 
 **An operating system for AI agents inside the Godot editor.** A native C++
-GDExtension that lets an external agent — Claude, Cursor, a script you wrote —
-inspect, build and edit a Godot 4 project through a typed, validated tool API,
-with a chat dock in the editor so you can watch it work and stop it when it goes
-wrong.
+GDExtension that lets an AI agent inspect, build, edit and *playtest* a Godot 4
+project through a typed, validated tool API — with a chat dock in the editor so
+you can watch it work and stop it when it goes wrong.
+
+Type a goal. The plugin plans it, checks each change before making it, runs the
+game, reads the errors, fixes them, and rolls back to a git snapshot if it can't.
 
 No copy-pasting code out of a chat window. No agent guessing at your scene tree.
 No wondering what it just did to your project.
 
 ```
-   your agent  ──JSON over loopback──▶  Godot editor
-                                        ├─ reads the live scene tree
-                                        ├─ creates nodes with checked types
-                                        ├─ writes and attaches GDScript
-                                        ├─ refuses unsafe deletes
-                                        └─ git-checkpoints every change
+   Plan ──▶ Validate ──▶ Execute ──▶ Observe ──▶ Repair ──▶ Snapshot ──▶ Continue
+    │           │            │           │          │           │
+    │           │            │           │          │           └─ git commit
+    │           │            │           │          └─ feed the error back
+    │           │            │           └─ run the game, parse the stack trace
+    │           │            └─ change the project
+    │           └─ compile the script in memory; refuse it if it's broken
+    └─ your model, or ours
 ```
 
-> **Status: Milestone 1 of 3 — shipped and working.** The transport, world
-> model, four core tools and the editor dock are complete and tested end to end
-> against Godot 4.4.1. See the [roadmap](docs/ROADMAP.md) for what's next.
+> **Status: Milestone 2 of 3 — shipped and working.** The pipeline, transactional
+> git rollback, playtest error interception, pre-execution validation and the
+> built-in Anthropic/OpenRouter agent are complete and tested end to end against
+> Godot 4.4.1 on Linux. Windows code paths are written but not yet verified on a
+> Windows machine. See the [roadmap](docs/ROADMAP.md) for what's next.
 
 ![The AI Agent dock in the Godot editor, showing an agent creating a node, attaching a script, and being refused a delete](docs/images/dock.png)
 
@@ -46,6 +52,58 @@ be walked back with one button.
 
 ---
 
+## What's in Milestone 2
+
+The loop that makes an agent accountable for whether its changes actually work.
+Full write-up: **[docs/PIPELINE.md](docs/PIPELINE.md)**.
+
+**Pre-execution validation.** Every planned call is checked before it runs, and
+a call that fails is *never executed* — the model gets the findings and revises,
+and the project is untouched. GDScript is compiled **in memory**, so a broken
+script never reaches disk. `extends` is checked against the target node's real
+class. Node paths are resolved against the open scene. Property bags are
+type-checked against `ClassDB`. After the batch, a whole-scene sweep catches the
+damage individually-valid edits do together — a delete that orphans a `NodePath`
+another step just set.
+
+**Playtest error interception.** `run_playtest` launches the game in a child
+process and tails its output, turning engine errors and GDScript stack traces
+into structured diagnostics:
+
+```json
+{ "severity": "error", "kind": "script", "line": 5, "function": "_ready",
+  "file": "res://player.gd",
+  "message": "Invalid access to property or key 'text' on a base object of type 'null instance'." }
+```
+
+That location is the difference between an agent that fixes a runtime error and
+one that guesses at it. Outcomes are `clean` / `errors` / `crashed` / `timeout`,
+and `quit_after_frames` gives you a deterministic smoke test.
+
+**Transactional git rollback.** A snapshot is committed *before* each batch runs,
+which is the only reason `git reset --hard` is safe here — there is nothing
+uncommitted left to destroy. The reset is guarded by
+`git merge-base --is-ancestor`, so a stale sha is refused rather than obeyed. The
+human's Rollback button stays on the additive `git revert` path, because outside
+the pipeline that guarantee does not hold.
+
+**A repair budget.** After three consecutive failures the pipeline stops asking
+the model to try again: it rolls back and hands control to you. A model that has
+failed three times on the same problem is usually wrong about what the problem is.
+
+**A built-in agent.** Anthropic or OpenRouter, configured in the dock — model
+selector fetched live from the provider, thinking on/off, reasoning effort from
+`low` to `max`, output token budget. API keys are stored encrypted in `user://`,
+never under `res://`, and an environment variable takes priority and is never
+written anywhere.
+
+![The dock's settings panel: provider, API key with its status line, model selector, thinking toggles, reasoning effort and token budget](docs/images/dock-settings.png)
+
+The bridge is unchanged and still first-class: both agents reach the project
+through the same tool registry and get the same manifest.
+
+---
+
 ## What's in Milestone 1
 
 **A transport.** A loopback WebSocket (or newline-delimited TCP) server inside
@@ -66,23 +124,17 @@ counter tells an agent when its view went stale.
 | `attach_script_safe` | Verifies `extends` against the node's real class, compiles the script, and deletes the file again if it doesn't parse. |
 | `safe_delete_node` | Audits children, authored signal connections, `NodePath` properties pointing into the subtree, and `$Name` references in project scripts. Blockers stop the delete; warnings are reported. |
 
-Plus `save_scene`, `open_scene`, `create_checkpoint`, `rollback_last`,
-`list_tools` and `ping`. Every one ships a [JSON Schema](project/addons/godot_ai_os/schemas/)
-that is handed to the agent on connect — so your tool definitions never drift
-from the implementation.
+Plus `save_scene`, `open_scene`, `validate_change`, `validate_scene`,
+`run_playtest`, `create_checkpoint`, `rollback_last`, `list_tools` and `ping`.
+Every one ships a [JSON Schema](project/addons/godot_ai_os/schemas/) that is
+handed to the agent on connect — so your tool definitions never drift from the
+implementation.
 
 **An editor dock.** Chat history with colour-coded tool calls and results, a
 prompt box (Enter sends, Shift+Enter newlines), an agent mode selector, a live
-`[PLANNING] [VALIDATING] [EXECUTING] [PLAYTESTING] [REPAIRING]` state header, and
-three buttons that matter: **Execute Plan**, **Stop**, **Rollback Last**.
-
-**Undo that survives a crash.** Every mutating call ends in a
-`[ai-checkpoint] <tool>` commit. Rollback is `git revert`, never
-`git reset --hard` — it cannot destroy work you hadn't committed.
-
-**Playtest output in the dock.** A small GDScript autoload forwards the running
-game's `print()`, errors and stack traces back over the same link, tagged
-`STDOUT` / `STDERR`.
+`[PLANNING] [VALIDATING] [EXECUTING] [PLAYTESTING] [REPAIRING]` state header, a
+settings panel for the model, and three buttons that matter: **Execute Plan**,
+**Stop**, **Rollback Last**.
 
 ---
 
@@ -110,15 +162,18 @@ python3 clients/python/godot_ai_client.py ./project create_node_safe \
 
 The node appears in the editor immediately, and the call shows up in the dock.
 
-Full instructions, including installing into your own project and hooking up
-playtest output: **[docs/SETUP.md](docs/SETUP.md)**.
+Or skip the client entirely: press **Settings** in the dock, paste an Anthropic
+or OpenRouter API key, pick a model, and type what you want built.
+
+Full instructions, including installing into your own project and configuring the
+built-in agent: **[docs/SETUP.md](docs/SETUP.md)**.
 
 ---
 
-## Connecting a real agent
+## Connecting your own agent
 
-The plugin has no model in it. It exposes tools; your harness supplies the
-intelligence. The reference client is 400 lines of dependency-free Python:
+The built-in agent is optional. The bridge exposes tools; your harness supplies
+the intelligence. The reference client is 400 lines of dependency-free Python:
 
 ```python
 from godot_ai_client import GodotAIClient
@@ -145,7 +200,8 @@ event loop: **[docs/AGENTS.md](docs/AGENTS.md)**.
 | **[Protocol](docs/PROTOCOL.md)** | The wire format, message by message. |
 | **[Architecture](docs/ARCHITECTURE.md)** | How it works and why it's built this way. |
 | **[Connecting agents](docs/AGENTS.md)** | Harness integration, Claude example, system prompt. |
-| **[Roadmap](docs/ROADMAP.md)** | Milestones 2 and 3, and what's deliberately out of scope. |
+| **[Pipeline](docs/PIPELINE.md)** | The agent loop: diagrams, pseudocode, error interception, prompt wrappers. |
+| **[Roadmap](docs/ROADMAP.md)** | Milestone 3, what shipped, and what's deliberately out of scope. |
 | **[Tool schemas](project/addons/godot_ai_os/schemas/)** | The authoritative tool contracts. |
 
 ---
@@ -156,10 +212,15 @@ event loop: **[docs/AGENTS.md](docs/AGENTS.md)**.
 - A C++17 compiler and SCons 4.0+ to build
 - `git` on `PATH` for checkpoints and rollback
 
-Linux, macOS and Windows are all supported by the build. Milestone 1 has been
-tested end to end on Linux against Godot 4.4.1; macOS and Windows builds follow
-standard `godot-cpp` conventions but have not been smoke-tested yet — reports
-welcome.
+Optional, for the built-in agent: an [Anthropic](https://console.anthropic.com/)
+or [OpenRouter](https://openrouter.ai/) API key. Driving the plugin from your own
+harness over the bridge needs no key.
+
+Linux, macOS and Windows are all supported by the build. Milestones 1 and 2 have
+been tested end to end on Linux against Godot 4.4.1. The Windows code paths —
+MSVC build, git discovery, line-ending handling — are written and reviewed but
+have not been run on a Windows machine; macOS follows standard `godot-cpp`
+conventions and is likewise untested. Reports on either are genuinely useful.
 
 ---
 
@@ -176,15 +237,22 @@ your editor.
 - Binding to `0.0.0.0` exposes an editor that can write arbitrary files to your
   whole network. The plugin warns you when you do it. Don't.
 - Keep the project in git. The checkpoint after every mutation is what makes an
-  autonomous agent's mistakes recoverable.
+  autonomous agent's mistakes recoverable — and without a repository the pipeline
+  cannot roll back at all, which it warns you about at the start of every run.
+- **API keys never touch `res://`.** They go in `user://`, encrypted, outside your
+  project — or better, in an environment variable that is read and never stored.
+  A key in a project folder gets committed, pushed, and scraped.
+- `git reset --hard` is only used on a snapshot the pipeline took moments earlier,
+  and only after `git merge-base --is-ancestor` confirms it is in your history.
+  The Rollback button you press yourself never uses it.
 
 ---
 
 ## Contributing
 
-Issues, ideas and pull requests are all welcome — especially macOS and Windows
-build reports, and opinions about what Milestone 2 should actually contain. See
-**[CONTRIBUTING.md](CONTRIBUTING.md)**.
+Issues, ideas and pull requests are all welcome — especially **macOS and Windows
+build reports**, which are the biggest gap right now, and opinions about what
+Milestone 3 should actually contain. See **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 
 ---
 

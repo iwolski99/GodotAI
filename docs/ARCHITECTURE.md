@@ -6,10 +6,11 @@ How the pieces fit, and why they are shaped the way they are.
 
 ## The shape of the problem
 
-An external agent wants to do four things to a Godot project: **read** its
-structure, **change** it, **run** it, and **undo** the change when running it
-goes badly. Milestone 1 builds the first, second and fourth, plus the transport
-they all travel over.
+An agent wants to do four things to a Godot project: **read** its structure,
+**change** it, **run** it, and **undo** the change when running it goes badly.
+Milestone 1 built the first, second and fourth, plus the transport they travel
+over. Milestone 2 added the third — and then the loop that makes the four add up
+to something more useful than four separate buttons.
 
 The hard part is not any individual operation — Godot's editor API can create a
 node in three lines. The hard part is that an agent operates without the context
@@ -24,41 +25,49 @@ awareness and infinite patience for being told "no".
 ## Layers
 
 ```
- ┌──────────────────────────────────────────────────────────────────┐
- │  External agent  (Claude, Cursor, a script, another editor)      │
- └───────────────────────────────┬──────────────────────────────────┘
-                                 │  JSON over WebSocket / TCP-JSONL
-                                 │  loopback, token handshake
- ┌───────────────────────────────▼──────────────────────────────────┐
- │  AIOSIpcServer            src/ipc/                               │
- │  Accepts connections, frames messages, authenticates, emits      │
- │  message_received on the editor's main thread.                   │
- └───────────────────────────────┬──────────────────────────────────┘
-                                 │
- ┌───────────────────────────────▼──────────────────────────────────┐
- │  AIOSPlugin               src/editor/                            │
- │  EditorPlugin. Owns everything, routes messages, polls the       │
- │  transport from _process, wires the dock to the tools.           │
- └───┬───────────────────────────┬───────────────────────────┬──────┘
-     │                           │                           │
- ┌───▼──────────────┐  ┌─────────▼──────────┐  ┌─────────────▼─────┐
- │ AIOSChatDock     │  │ AIOSToolRegistry   │  │ AIOSGitCheckpoint │
- │ src/editor/      │  │ src/tools/         │  │ src/vcs/          │
- │ Renders state,   │  │ Dispatch + policy: │  │ Commits after     │
- │ emits intent.    │  │ checkpoint, cache  │  │ each mutation,    │
- │                  │  │ invalidation, log. │  │ reverts on undo.  │
- └──────────────────┘  └─────────┬──────────┘  └───────────────────┘
-                                 │
-                 ┌───────────────┴───────────────┐
-                 │                               │
-      ┌──────────▼─────────┐        ┌────────────▼──────────┐
-      │ AIOSWorldModel     │        │ AIOSSceneTools        │
-      │ src/world/         │        │ src/tools/            │
-      │ The read path.     │        │ The write path.       │
-      │ Cached JSON view   │        │ create / attach /     │
-      │ of the live tree.  │        │ delete / save / open  │
-      └────────────────────┘        └───────────────────────┘
+ ┌──────────────────────────────────┐   ┌───────────────────────────────────┐
+ │  External agent                  │   │  Built-in agent                   │
+ │  Claude Code, Cursor, a script   │   │  AIOSPipeline + AIOSLlmClient     │
+ └────────────────┬─────────────────┘   └────────────────┬──────────────────┘
+                  │ JSON over WebSocket / TCP-JSONL      │ in-process
+                  │ loopback, token handshake            │ signals
+ ┌────────────────▼─────────────────┐                    │
+ │  AIOSIpcServer      src/ipc/     │                    │
+ │  Frames, authenticates, emits on │                    │
+ │  the editor's main thread.       │                    │
+ └────────────────┬─────────────────┘                    │
+                  │                                      │
+ ┌────────────────▼──────────────────────────────────────▼──────────────────┐
+ │  AIOSPlugin                                            src/editor/       │
+ │  EditorPlugin. Owns everything, routes messages, polls the transport and │
+ │  the pipeline from _process, wires the dock to the tools.                │
+ └───┬──────────────────────┬──────────────────────────┬───────────────┬────┘
+     │                      │                          │               │
+ ┌───▼────────────┐  ┌──────▼───────────┐  ┌───────────▼────┐  ┌───────▼────┐
+ │ AIOSChatDock   │  │ AIOSToolRegistry │  │ AIOSValidator  │  │ AIOSGit-   │
+ │ src/editor/    │  │ src/tools/       │  │ src/validate/  │  │ Checkpoint │
+ │ Renders state, │  │ Dispatch +       │  │ Static checks  │  │ src/vcs/   │
+ │ emits intent.  │  │ policy: check-   │  │ before a call  │  │ Snapshot,  │
+ │ Settings panel │  │ point, cache     │  │ ever runs.     │  │ reset,     │
+ │ for the model. │  │ invalidation.    │  │ Nothing is     │  │ revert.    │
+ │                │  │                  │  │ written.       │  │            │
+ └────────────────┘  └──────┬───────────┘  └────────────────┘  └────────────┘
+                            │
+        ┌───────────────────┼───────────────────┐
+        │                   │                   │
+ ┌──────▼──────────┐ ┌──────▼──────────┐ ┌──────▼──────────────┐
+ │ AIOSWorldModel  │ │ AIOSSceneTools  │ │ AIOSPlaytest        │
+ │ src/world/      │ │ src/tools/      │ │ src/playtest/       │
+ │ The read path.  │ │ The write path. │ │ The run path.       │
+ │ Cached JSON of  │ │ create/attach/  │ │ Child process +     │
+ │ the live tree.  │ │ delete/save.    │ │ --log-file tailing. │
+ └─────────────────┘ └─────────────────┘ └─────────────────────┘
 ```
+
+Both agents reach the project through the same `AIOSToolRegistry`, and both get
+the same manifest from `list_tools()`. That is deliberate: the moment the
+built-in agent has a private path to the tools, the two drift apart and one of
+them starts silently rotting.
 
 ---
 
@@ -184,22 +193,58 @@ is plain GDScript and deletes itself when it detects an export template.
 
 ---
 
-## Where Milestone 2 plugs in
+## Milestone 2: the pipeline
 
-The seams are already cut:
+Milestone 1's tools let an agent make changes. Milestone 2 wraps them in a loop
+that is accountable for whether those changes worked:
 
-- **Playtesting** — `EditorInterface::play_custom_scene` plus the existing
-  `runtime_log` event path. The transport already handles the running game as
-  just another client.
-- **Validation** — `AIOSToolRegistry::call_tool` is the single funnel every
-  mutation passes through. A validation pass goes there and applies to every
-  tool at once, including ones not written yet.
-- **Repair loops** — `world_changed` events plus the checkpoint stack give an
-  agent everything it needs to detect a regression and walk back to a known-good
-  state.
-- **The state machine** — the dock already renders `PLANNING → VALIDATING →
-  EXECUTING → PLAYTESTING → REPAIRING`. Milestone 1 lets an agent drive those
-  labels manually; Milestone 2 makes the plugin drive them itself.
+```
+Plan ──▶ Validate ──▶ Execute ──▶ Observe ──▶ Repair ──▶ Snapshot ──▶ Continue
+```
+
+The full treatment — stage-by-stage pseudocode, the process-interception code,
+and the exact text fed back to the model — is in
+**[PIPELINE.md](PIPELINE.md)**. The three decisions that shape everything else:
+
+**Validation runs before execution, and twice.** Once per planned call
+(`validate_planned_call`), and once over the whole scene after the batch
+(`validate_scene`). The second pass exists because individually valid edits
+combine badly: a delete that orphans a `NodePath` another step just set. Scripts
+are compiled **in memory** — `set_source_code()` + `reload()` on a `GDScript`
+instance — so a broken script never touches disk. That matters more than it
+sounds: a bad `.gd` written to `res://` poisons the editor's script cache and
+shows up in the FileSystem dock even if you delete it a moment later.
+
+**Snapshot before, reset after.** A git commit is taken *before* each batch runs,
+which is the only reason `git reset --hard` is a safe rollback here — there is
+nothing uncommitted left for it to destroy. The reset is additionally guarded by
+`git merge-base --is-ancestor`, so a stale sha is refused rather than obeyed. The
+human's Rollback button deliberately does *not* use this path; outside the
+pipeline the "everything was just committed" guarantee does not hold, so it stays
+on `git revert`.
+
+**Observation is a child process, not an API call.** `EditorInterface` can play a
+scene, but it cannot hand you that scene's stderr. So `run_playtest` spawns Godot
+with `--log-file` and tails the file from `_process`. `OS::execute()` would block
+the editor for the whole playtest; `OS::execute_with_pipe()` blocks whenever the
+pipe is empty, which is worse because it is intermittent. Tailing a file is
+non-blocking, cross-platform, and captures GDScript stack traces with file, line
+and function — which is the difference between an agent that fixes a runtime error
+and one that guesses at it.
+
+### Where the model configuration lives
+
+`AIOSLlmClient` is a `Node` rather than a `RefCounted`, because `HTTPRequest` is:
+it needs a scene tree to drive its own polling. Every request is asynchronous for
+the same reason everything else is single-threaded — a blocking HTTP call would
+freeze the editor, *including the Stop button whose entire job is to interrupt a
+run that has gone wrong*.
+
+The conversation history is stored in Anthropic's shape regardless of provider.
+That is not favouritism: thinking blocks carry signatures the API requires to be
+echoed back verbatim, and they have no OpenAI-shaped equivalent. Storing
+OpenAI-native and converting up would discard data. So Anthropic requests are
+near-passthrough and OpenRouter requests are translated on the way out and back.
 
 ---
 
@@ -212,7 +257,13 @@ The seams are already cut:
 | `src/world/aios_world_model.*` | Scene-tree → JSON, caching, revision counter, node path resolution. |
 | `src/tools/aios_scene_tools.*` | `create_node_safe`, `attach_script_safe`, `safe_delete_node`, `save_scene`, `open_scene`. |
 | `src/tools/aios_tool_registry.*` | Tool table, dispatch, schema loading, checkpoint and cache policy. |
-| `src/vcs/aios_git_checkpoint.*` | `git` subprocess wrapper; checkpoint stack; revert-based rollback. |
+| `src/vcs/aios_git_checkpoint.*` | `git` subprocess wrapper; cross-platform git discovery; snapshots, ancestor-guarded hard reset, revert-based rollback. |
+| `src/validate/aios_validator.*` | The Validate stage. In-memory GDScript compilation, NodePath resolution, property type checks, whole-scene sweep. |
+| `src/playtest/aios_playtest.*` | The Observe stage. Child-process launch, `--log-file` tailing, diagnostic parsing. |
+| `src/pipeline/aios_pipeline.*` | The loop itself, and the prompt-wrapper builders that feed failures back to the model. |
+| `src/agent/aios_provider.*` | Request building and response normalisation for Anthropic and OpenRouter. |
+| `src/agent/aios_llm_client.*` | Async HTTP transport, conversation history, model listing. |
+| `src/agent/aios_credentials.*` | Encrypted API key store in `user://`; environment variables take priority. |
 | `src/editor/aios_plugin.*` | `EditorPlugin`; owns everything; message routing; project settings; session file. |
 | `src/editor/aios_chat_dock.*` | The dock UI. |
 | `src/util/aios_json.*` | Variant ⇄ JSON marshalling and type coercion. |

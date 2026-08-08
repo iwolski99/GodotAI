@@ -135,6 +135,11 @@ never acknowledged.
 | `stop` | `{}` | The human pressed **Stop**. Abandon the current step. |
 | `world_changed` | `{revision, cause}` | The project changed (possibly by another agent, or by the human). Your cached world model is stale. |
 | `scene_saved` | `{path}` | A scene was written to disk. |
+| `runtime_log` | `{stream, text}` | A line of console output from a playtest in progress. `stream` is `stdout` or `stderr`. |
+| `playtest_finished` | the full playtest report | A `run_playtest` finished. **This is how you get the result** — the tool call itself only acknowledges the launch. |
+| `status` | `{state, detail}` | The built-in agent's pipeline changed stage. Only sent when the in-editor agent is driving. |
+| `agent_message` | `{text}` | The built-in agent said something. |
+| `run_finished` | `{ok, message, steps_executed, filesystem_changed}` | A built-in-agent run ended. |
 
 ### Agent → editor
 
@@ -151,6 +156,59 @@ none of them is a black box to the human watching it.
 
 Text arriving from an agent is BBCode-escaped before display, so markup in a
 model's output cannot inject formatting or images into the editor UI.
+
+---
+
+## Asynchronous tools
+
+Every tool but one returns its result in the `response` to your `request`.
+
+`run_playtest` is the exception, because the thing it is reporting on has not
+happened yet. The response acknowledges the launch:
+
+```json
+{
+  "type": "response", "id": "7", "tool": "run_playtest", "ok": true,
+  "result": { "scene": "res://main.tscn", "pid": 15809,
+              "timeout_sec": 45.0, "log_file": "user://godot_ai_os/playtest.log" }
+}
+```
+
+…and the report arrives later as a `playtest_finished` event:
+
+```json
+{
+  "type": "event", "event": "playtest_finished",
+  "data": {
+    "outcome": "errors",
+    "passed": false,
+    "summary": "The scene ran but logged 1 error(s).",
+    "scene": "res://main.tscn",
+    "elapsed_sec": 1.24,
+    "exit_code": 0,
+    "error_count": 1,
+    "warning_count": 0,
+    "diagnostics": [
+      { "severity": "error", "kind": "script",
+        "message": "Invalid access to property or key 'text' on a base object of type 'null instance'.",
+        "file": "res://runtime_bomb.gd", "line": 5, "function": "_ready",
+        "raw": "SCRIPT ERROR: Invalid access to property or key 'text' ..." }
+    ],
+    "output_tail": ["Godot Engine v4.4.1.stable.official"],
+    "output_truncated": false
+  }
+}
+```
+
+While it runs, `runtime_log` events stream the console output line by line.
+
+Save the scene before you playtest. The child process reads the project from
+disk, not from the editor's unsaved state, so an unsaved edit is invisible to it.
+
+Outcomes are `clean`, `errors`, `crashed` and `timeout`. Only `clean` sets
+`passed: true`. A `timeout` is not by itself a failure — a game with no exit
+condition always hits it — so pass `quit_after_frames` when you want a
+deterministic smoke test.
 
 ---
 

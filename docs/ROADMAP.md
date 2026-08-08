@@ -27,38 +27,73 @@ and a way to undo.
 
 ---
 
-## Milestone 2 — The autonomous loop *(next)*
+## Milestone 2 — The autonomous loop ✅ *shipped*
 
-Milestone 1 lets an agent make changes. Milestone 2 makes it responsible for
-whether they work.
+Milestone 1 let an agent make changes. Milestone 2 makes it responsible for
+whether they work. Full write-up: **[docs/PIPELINE.md](PIPELINE.md)**.
 
-**Playtest harness**
-- Launch a scene under editor control, with a time limit and a clean shutdown
-- Capture runtime errors, script stack traces and warnings as structured events
-  rather than log lines to be regexed
-- Report crash / freeze / clean-exit as a first-class result an agent can branch on
+**The pipeline**
+- [x] `Plan → Validate → Execute → Observe → Repair → Snapshot → Continue` as a
+      strict linear state machine, driven by the plugin rather than narrated by
+      the agent
+- [x] Every C++ hook, validation routine and runtime interceptor serves exactly
+      one named stage
+- [x] Repair budget — after N consecutive failures the pipeline rolls back and
+      hands control to the human instead of letting the model dig
+- [x] Prompt-wrapper builders that turn machine findings into text a model can
+      act on: validation feedback, playtest feedback, rollback notice
 
-**Validation gate**
-- A pre-flight pass in front of every mutating tool: does the scene still make
-  sense after this change?
-- Orphaned `NodePath`s, missing resources, scripts referencing nodes that no
-  longer exist, signal connections to methods that were deleted
-- Runs on `dry_run` too, so a plan can be validated before any of it executes
+**Transactional git engine**
+- [x] Snapshot before every batch of changes; `git reset --hard` back to it when
+      the batch breaks the project
+- [x] `git merge-base --is-ancestor` guard so a stray sha can never discard
+      unrelated history
+- [x] Cross-platform git discovery, including Windows install locations and a
+      `GODOT_AI_OS_GIT` override
+- [x] The human's Rollback button stays on the safe `git revert` path
 
-**Repair loop**
-- Feed a failed playtest back to the agent with the diff of what changed since
-  the last known-good checkpoint
-- Automatic rollback on repeated failure instead of letting an agent dig deeper
-- The `PLANNING → VALIDATING → EXECUTING → PLAYTESTING → REPAIRING` state machine
-  driven by the plugin rather than narrated by the agent
+**Playtest harness and error interception**
+- [x] `run_playtest` launches the game in a child process with a time limit and
+      an optional deterministic frame-count exit
+- [x] Non-blocking stdout/stderr capture via Godot's `--log-file`, tailed from
+      `_process` — no autoload required in the game
+- [x] Engine errors, script errors and GDScript stack traces parsed into
+      structured diagnostics with file, line and function
+- [x] `clean` / `errors` / `crashed` / `timeout` as a first-class result an agent
+      can branch on
 
-**More tools**
+**Pre-execution validation**
+- [x] GDScript compiled in memory — never written to disk — for real parser
+      diagnostics
+- [x] `extends` checked against the target node's actual class
+- [x] NodePath references resolved against the open scene
+- [x] Property bags type-checked against ClassDB before anything is instantiated
+- [x] Whole-scene sweep after execution: dangling NodePaths, missing resources,
+      broken scripts, nodes with no owner
+- [x] `validate_change` exposes the same checks as a dry-run tool
+
+**Built-in agent** *(added at a user's request, and a reversal — see below)*
+- [x] Anthropic and OpenRouter support behind one canonical conversation format
+- [x] Model selector, populated live from the provider's model list
+- [x] Thinking on/off, reasoning effort `low` → `max`, output token budget
+- [x] API keys stored encrypted in `user://`, with environment variables taking
+      priority and never being written anywhere
+
+**Windows**
+- [x] `.gitattributes` so a Windows checkout does not rewrite every file to CRLF
+      and make the first checkpoint look like a whole-project rewrite
+- [x] No console windows flashing up from git invocations
+- [x] Documented MSVC build path
+- [ ] **Not yet verified on a Windows machine.** The code paths are written and
+      reviewed; the development environment is Linux. Reports welcome.
+
+**Deferred to Milestone 3**
 - `connect_signal_safe` / `disconnect_signal_safe`
 - `set_node_properties` (edit, not just create)
 - `move_node` / `reparent_node` with reference fixups
 - `create_scene`, `instance_scene_safe`
-- `read_script` / `patch_script` with structural edits rather than whole-file writes
-- `run_project` / `stop_project`
+- `read_script` / `patch_script` with structural edits rather than whole-file
+  writes
 
 ---
 
@@ -79,16 +114,35 @@ Making it something other people can rely on.
 
 ---
 
+## Changed our minds
+
+Milestone 1's roadmap listed two things as "not planned" that Milestone 2 then
+shipped. Leaving that unmarked would be quietly rewriting history, so:
+
+- **~~A bundled LLM client.~~** Originally argued the plugin should be a transport
+  and a toolbox, with model choice belonging to whatever harness you already use.
+  That reasoning holds for people who *have* a harness. It is a wall for everyone
+  else, and it made the pipeline impossible to demonstrate without writing a
+  second program first. The bridge is unchanged and still first-class — the
+  built-in agent is an addition, not a replacement.
+
+- **~~API keys in the editor.~~** The original objection was specifically to a
+  credential sitting in an addon folder under `res://`, and that objection was
+  right and still stands: nothing is ever written there. Keys live in `user://`,
+  encrypted, outside the project — or, better, in an environment variable that is
+  read and never stored. The rule was too broad, not wrong.
+
+---
+
 ## Not planned
 
 Things deliberately out of scope, so nobody builds them expecting a merge:
 
-- **A bundled LLM client.** The plugin is a transport and a toolbox. Model
-  choice, prompting and cost belong to whatever harness you already use.
-- **API keys in the editor.** No credential should live in a `.gdextension`
-  addon folder.
 - **Remote / cloud access.** This binds loopback on purpose. Exposing an editor
   that can write arbitrary files to a network is not a feature.
+- **Sending your project to a model wholesale.** Tools answer specific questions
+  about specific parts of the project. There is no "upload the repo" call and
+  there will not be one.
 - **C# / .NET tool equivalents.** GDScript first. C# support would need the tool
   layer to understand a second script backend, and that is a lot of surface for
   a small audience — reconsider if people ask.
@@ -98,4 +152,4 @@ Things deliberately out of scope, so nobody builds them expecting a merge:
 ## Have an opinion?
 
 Open an issue. Concrete arguments about ordering, or about what is missing from
-Milestone 2, are more useful than agreement.
+Milestone 3, are more useful than agreement.

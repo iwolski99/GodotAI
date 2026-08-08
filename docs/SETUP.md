@@ -45,9 +45,12 @@ git submodule update --init --recursive
 ## 2. Build
 
 ```bash
-scons platform=linux target=editor -j$(nproc)      # Linux
-scons platform=macos target=editor -j$(sysctl -n hw.ncpu)   # macOS
-scons platform=windows target=editor -j%NUMBER_OF_PROCESSORS%   # Windows
+scons platform=linux target=editor -j$(nproc)                 # Linux
+scons platform=macos target=editor -j$(sysctl -n hw.ncpu)     # macOS
+```
+
+```bat
+scons platform=windows target=editor -j%NUMBER_OF_PROCESSORS%
 ```
 
 The first run compiles `godot-cpp` as well and takes 5–20 minutes depending on
@@ -57,7 +60,64 @@ The library lands directly in the addon folder:
 
 ```
 project/addons/godot_ai_os/bin/libgodot_ai_os.linux.editor.x86_64.so
+project/addons/godot_ai_os/bin/libgodot_ai_os.windows.editor.x86_64.dll
 ```
+
+<details>
+<summary><strong>Windows, in more detail</strong></summary>
+
+Windows is the platform most likely to trip you up, so the specifics:
+
+**1. Use the Developer Command Prompt.** Install Visual Studio 2019 or newer with
+the *Desktop development with C++* workload, then launch **x64 Native Tools
+Command Prompt for VS**. A plain `cmd` or PowerShell will not have `cl.exe` on
+`PATH`, and SCons will either fail to find a compiler or silently pick a 32-bit
+one.
+
+```bat
+cd C:\path\to\GodotAI
+pip install scons
+scons platform=windows target=editor -j%NUMBER_OF_PROCESSORS%
+```
+
+**2. Line endings are handled for you.** The repository ships a `.gitattributes`
+that normalises text files to LF. Without it, a Windows checkout rewrites every
+file to CRLF and the plugin's own git checkpoints show the entire project as
+modified on the first run — which makes every checkpoint useless and every diff
+unreadable. If you cloned before this existed, refresh the working tree once:
+
+```bat
+git rm --cached -r .
+git reset --hard
+```
+
+**3. Git must be findable.** Checkpoints and rollback shell out to `git`. The
+plugin looks in this order:
+
+1. `%GODOT_AI_OS_GIT%`, if you set it to a full path to `git.exe`
+2. `git` on `PATH`
+3. `%ProgramFiles%\Git\cmd\git.exe`
+4. `%ProgramFiles(x86)%\Git\cmd\git.exe`
+5. `%LOCALAPPDATA%\Programs\Git\cmd\git.exe`
+6. GitHub Desktop's bundled copy
+7. `C:\Program Files\Git\cmd\git.exe`
+
+So a normal *Git for Windows* install works with no configuration, and a portable
+or unusual install works by setting one environment variable. The dock tells you
+which it found — or that it found none.
+
+No console windows flash up: git is invoked with `open_console = false`.
+
+**4. Paths with spaces are fine.** Arguments are passed as an array to
+`OS::execute`, never concatenated into a command line, so
+`C:\Users\Your Name\Documents\My Game` needs no quoting.
+
+**Status:** the Windows code paths are written and reviewed but have **not** been
+smoke-tested on a Windows machine — the development environment for this project
+is Linux. Everything above follows from the implementation rather than from a
+successful run. If you build on Windows, a report either way is genuinely useful:
+[open an issue](https://github.com/iwolski99/GodotAI/issues).
+</details>
 
 <details>
 <summary>Build options</summary>
@@ -120,7 +180,85 @@ plugin says so rather than silently doing nothing.
 
 ---
 
-## 5. Connect an agent
+## 5. Configure the built-in agent
+
+Milestone 2 added an agent that runs *inside* the editor: you type a goal in the
+dock, and the plugin drives the whole
+[Plan → Validate → Execute → Observe → Repair](PIPELINE.md) loop itself. It needs
+a model, which means an API key.
+
+*(This is optional. If you would rather drive the plugin from your own harness
+over the bridge, skip to step 6 — that path needs no key at all.)*
+
+Open the **AI Agent** dock and press **Settings**:
+
+![The dock's settings panel: provider, API key, model selector, thinking toggle, reasoning effort and token budget](images/dock-settings.png)
+
+| Field | What to put in it |
+| --- | --- |
+| **Provider** | `Anthropic` talks to the Claude API directly. `OpenRouter` proxies hundreds of models — Claude, GPT, Gemini, open-weights — behind a single key. |
+| **API key** | Paste, then **Save key**. The field clears itself immediately. |
+| **Model** | Press **Refresh** to fetch the provider's current list, or type an id and press Enter. |
+| **Think / Show** | Whether the model reasons before answering, and whether that reasoning is printed in the dock. |
+| **Effort** | `low` → `max`. How hard it thinks. |
+| **Max output tokens** | Ceiling for one reply. Reasoning tokens count against it. |
+
+Model ids are **not** interchangeable between providers — `claude-opus-5` for
+Anthropic, `anthropic/claude-opus-4.1` for OpenRouter — so the plugin remembers
+one per provider and switches between them with the dropdown.
+
+### Where the key is stored
+
+Two options, and the second is better:
+
+**1. The encrypted store (what the Save button uses).** Written to
+`user://godot_ai_os/credentials.enc` — outside your project entirely:
+
+| OS | Location |
+| --- | --- |
+| Windows | `%APPDATA%\Godot\app_userdata\<project>\godot_ai_os\` |
+| Linux | `~/.local/share/godot/app_userdata/<project>/godot_ai_os/` |
+| macOS | `~/Library/Application Support/Godot/app_userdata/<project>/godot_ai_os/` |
+
+The file is encrypted with a passphrase derived from the machine, so copying it to
+another computer gets you nothing. Be clear about what that is and is not: it is
+encryption at rest against casual disclosure, **not** a keychain. Anything running
+as you on this machine can derive the same passphrase and read it.
+
+**2. An environment variable (safer).** Set `ANTHROPIC_API_KEY` or
+`OPENROUTER_API_KEY` before launching Godot. These are checked *first* and are
+never written anywhere:
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."      # Linux / macOS
+```
+
+```bat
+setx OPENROUTER_API_KEY "sk-or-..."        :: Windows, then reopen the terminal
+```
+
+When an environment variable is set, the dock says so explicitly — because
+otherwise someone pastes a key, sees no effect, and concludes the plugin is
+broken.
+
+> **A key never goes anywhere near `res://`.** A key in the project folder gets
+> committed, pushed, and scraped. This is a plugin for public repositories, so
+> that is a matter of when, not if.
+
+### Agent behaviour settings
+
+**Project → Project Settings → AI Agent OS → agent**:
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `max_turns` | 24 | Hard cap on model turns per run. Stops a loop running up a bill. |
+| `max_repair_attempts` | 3 | Consecutive failures before the pipeline rolls back and stops. |
+| `auto_playtest` | on | Allow the pipeline to run the game as part of its loop. |
+| `auto_rollback` | on | `git reset --hard` to the step snapshot when the repair budget is spent. |
+
+---
+
+## 6. Connect an external agent
 
 The plugin writes everything a client needs to
 `<project>/.godot/ai_agent_os/session.json`:
@@ -154,18 +292,23 @@ The node appears in the editor immediately, and the dock logs the call. See
 
 ---
 
-## 6. Stream playtest output into the dock (optional)
+## 7. Playtest output
 
-The running game is a separate process, so it has to report its own output.
-Add the bridge autoload in **Project → Project Settings → Globals → Autoload**:
+**Playtests the agent starts need no setup.** The `run_playtest` tool launches the
+game with Godot's `--log-file` flag and tails the result, so `print()`, engine
+errors and GDScript stack traces come back as structured diagnostics — with file,
+line and function — automatically. That is the
+[Observe stage](PIPELINE.md#intercepting-the-running-game).
+
+**Playtests *you* start with the editor's Play button** are a different process
+that the plugin did not launch, so if you want those in the dock too, add the
+bridge autoload in **Project → Project Settings → Globals → Autoload**:
 
 | Path | Name |
 | --- | --- |
 | `res://addons/godot_ai_os/runtime/agent_log_bridge.gd` | `AgentLogBridge` |
 
 Also enable **Project Settings → Debug → File Logging → Enable File Logging**.
-Now `print()`, `push_error()`, engine errors and script stack traces from every
-playtest appear in the dock, tagged `STDOUT` / `STDERR`.
 
 The autoload removes itself in exported builds, so it is safe to leave enabled.
 
