@@ -48,7 +48,7 @@ static const ToolInfo TOOL_TABLE[] = {
 	{ "validate_change", "Dry-run a planned tool call through the static checker without executing it.", false },
 	{ "validate_scene", "Sweep the open scene for dangling NodePaths, missing resources and broken scripts.", false },
 	{ "run_playtest", "Launch the game in a child process and return its runtime errors and stack traces.", false },
-	{ "capture_viewport_screenshot", "Take a picture of the editor viewport and look at it. Catches what no error message reports: bad lighting, misplaced geometry, broken layout.", false },
+	{ "capture_viewport_screenshot", "Capture the editor viewport as a PNG. Requires a vision-capable model to see the image; otherwise you get the saved file path only.", false },
 	{ "generate_3d_asset", "Generate a 3D model from a text prompt via Meshy or Tripo3D, download it, and import it. Costs money per call.", true },
 	{ "import_asset_from_url", "Download any asset URL into the project and import it. Works with providers this plugin does not know about.", true },
 	{ "cleanup_mesh", "Run a mesh through headless Blender: reduce triangles, normalise scale, and tag collision geometry.", true },

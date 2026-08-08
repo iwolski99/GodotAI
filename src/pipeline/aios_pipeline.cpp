@@ -606,6 +606,10 @@ String AIOSPipeline::build_system_prompt(const String &p_mode, bool p_git_availa
 			"tool.\n\n"
 			"Use dry_run when you are unsure. It runs every check and reports what would happen, at no cost to "
 			"the project.\n\n"
+			"capture_viewport_screenshot sends the editor viewport as an image. That only works with "
+			"vision-capable models (Anthropic Claude, OpenRouter models that accept images such as GPT-4o). "
+			"If the model cannot see images, you still receive the saved PNG path — open it locally or use "
+			"get_world_model, validate_scene, and run_playtest instead.\n\n"
 			"Finish the whole task, not the easy part of it. Only report completion when it is actually done. "
 			"If something is genuinely blocked, do the rest and say plainly what is missing and why.\n\n"
 			"Tell the human what you are doing as you go, in plain sentences. They are watching a dock, not "
@@ -1349,6 +1353,19 @@ void AIOSPipeline::_push_result(const String &p_id, const Dictionary &p_payload,
 	// base64 string buried in JSON — a model handed 400 KB of base64 text will
 	// dutifully try to read it as text and learn nothing.
 	if (!p_is_error && payload.has("image_base64")) {
+		if (llm != nullptr && !llm->get_vision_supported()) {
+			Dictionary described = payload.duplicate();
+			described.erase("image_base64");
+			described["vision_unavailable"] = true;
+			described["message"] =
+					"Screenshot saved to disk, but the configured model cannot accept images. Open the PNG "
+					"path locally, switch to a vision-capable model in Settings, or rely on get_world_model / "
+					"validate_scene / run_playtest instead.";
+			block["content"] = JSON::stringify(described);
+			pending_results.push_back(block);
+			return;
+		}
+
 		Dictionary described = payload.duplicate();
 		const String base64 = described["image_base64"];
 		const String media_type = String(described.get("media_type", "image/png"));

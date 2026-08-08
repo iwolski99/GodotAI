@@ -29,6 +29,7 @@ Dictionary AIOSProviderConfig::to_dict() const {
 	d["show_thinking"] = show_thinking;
 	d["effort"] = effort;
 	d["use_fallbacks"] = use_fallbacks;
+	d["vision_supported"] = vision_supported;
 	return d;
 }
 
@@ -41,6 +42,11 @@ AIOSProviderConfig AIOSProviderConfig::from_dict(const Dictionary &p_dict) {
 	c.show_thinking = AIOSJson::get_bool(p_dict, "show_thinking", c.show_thinking);
 	c.effort = AIOSJson::get_string(p_dict, "effort", c.effort);
 	c.use_fallbacks = AIOSJson::get_bool(p_dict, "use_fallbacks", c.use_fallbacks);
+	if (p_dict.has("vision_supported")) {
+		c.vision_supported = AIOSJson::get_bool(p_dict, "vision_supported", c.vision_supported);
+	} else {
+		c.vision_supported = AIOSProvider::infer_model_supports_vision(c.provider, c.model);
+	}
 	return c;
 }
 
@@ -556,6 +562,128 @@ Array AIOSProvider::align_tool_results(const Array &p_results, const Array &p_as
 	return aligned;
 }
 
+bool AIOSProvider::infer_model_supports_vision(const String &p_provider, const String &p_model) {
+	if (p_provider == "anthropic") {
+		return true;
+	}
+
+	const String model = p_model.to_lower();
+	if (model.is_empty()) {
+		return true;
+	}
+
+	// Common OpenRouter vision-capable families.
+	if (model.contains("claude")) {
+		return true;
+	}
+	if (model.contains("gpt-4o") || model.contains("gpt-4.1") || model.contains("gpt-5")) {
+		return true;
+	}
+	if (model.contains("gemini") && (model.contains("pro") || model.contains("flash") || model.contains("vision"))) {
+		return true;
+	}
+	if (model.contains("llava") || model.contains("pixtral") || model.contains("qwen-vl") ||
+			model.contains("vision")) {
+		return true;
+	}
+
+	// Known text-only families on OpenRouter.
+	if (model.contains("deepseek") && !model.contains("vl")) {
+		return false;
+	}
+	if (model.contains("llama") || model.contains("mistral") || model.contains("mixtral")) {
+		return false;
+	}
+	if (model.contains("composer") || model.contains("minimax") || model.contains("phi")) {
+		return false;
+	}
+
+	// Unknown id: try images once; the client retries without them on rejection.
+	return true;
+}
+
+bool AIOSProvider::is_image_input_error(int p_status, const String &p_raw_body) {
+	const String lower = p_raw_body.to_lower();
+	if (!lower.contains("image")) {
+		return false;
+	}
+	if (lower.contains("image input") || lower.contains("multimodal") || lower.contains("vision")) {
+		return true;
+	}
+	if (lower.contains("does not support") && lower.contains("image")) {
+		return true;
+	}
+	// OpenRouter returns 404 for "No endpoints found that support image input".
+	return p_status == 404 && lower.contains("endpoint");
+}
+
+Array AIOSProvider::strip_images_from_tool_results(const Array &p_blocks) {
+	Array out;
+	for (int i = 0; i < p_blocks.size(); i++) {
+		if (Variant(p_blocks[i]).get_type() != Variant::DICTIONARY) {
+			out.push_back(p_blocks[i]);
+			continue;
+		}
+
+		Dictionary block = p_blocks[i];
+		if (String(block.get("type", "")) != "tool_result") {
+			out.push_back(block);
+			continue;
+		}
+
+		Variant content = block.get("content", "");
+		if (content.get_type() != Variant::ARRAY) {
+			out.push_back(block);
+			continue;
+		}
+
+		Array inner = content;
+		String flat;
+		bool had_image = false;
+		for (int k = 0; k < inner.size(); k++) {
+			if (Variant(inner[k]).get_type() != Variant::DICTIONARY) {
+				continue;
+			}
+			Dictionary ib = inner[k];
+			const String itype = String(ib.get("type", ""));
+			if (itype == "image") {
+				had_image = true;
+			} else if (itype == "text") {
+				if (!flat.is_empty()) {
+					flat += "\n";
+				}
+				flat += String(ib.get("text", ""));
+			}
+		}
+
+		if (had_image) {
+			Dictionary note;
+			note["vision_unavailable"] = true;
+			note["message"] =
+					"The screenshot was captured and saved to disk, but the configured model cannot accept "
+					"images. Open the PNG path locally, switch to a vision-capable model (e.g. Claude or GPT-4o "
+					"on OpenRouter), or continue using get_world_model and validate_scene instead.";
+			if (!flat.is_empty()) {
+				Variant parsed = JSON::parse_string(flat);
+				if (parsed.get_type() == Variant::DICTIONARY) {
+					Dictionary meta = parsed;
+					meta["vision_unavailable"] = true;
+					meta["message"] = note["message"];
+					flat = JSON::stringify(meta);
+				} else {
+					flat += "\n" + JSON::stringify(note);
+				}
+			} else {
+				flat = JSON::stringify(note);
+			}
+		}
+
+		block["content"] = flat.is_empty() ? String("(no textual tool result)") : flat;
+		out.push_back(block);
+	}
+	return out;
+}
+
 /* -------------------------------------------------------------------------- */
 /*  Response parsing                                                           */
 /* -------------------------------------------------------------------------- */
@@ -747,7 +875,12 @@ Dictionary AIOSProvider::parse_error(const String &p_provider, int p_status, con
 	if (p_status == 401 || p_status == 403) {
 		hint = " Check the API key in the AI Agent dock's Settings panel.";
 	} else if (p_status == 404) {
-		hint = " The model ID may be wrong for this provider - pick one from the model dropdown.";
+		if (is_image_input_error(p_status, p_raw_body)) {
+			hint = " This model cannot accept images. Switch to a vision-capable model (Claude, GPT-4o, Gemini, "
+				   "etc.) in Settings, or the agent will continue without sending screenshots.";
+		} else {
+			hint = " The model ID may be wrong for this provider - pick one from the model dropdown.";
+		}
 	} else if (p_status == 429) {
 		hint = " Rate limited. Wait a moment, or lower the reasoning effort to spend fewer tokens.";
 	} else if (p_status >= 500) {
@@ -775,6 +908,22 @@ Array AIOSProvider::parse_models(const String &p_provider, const Dictionary &p_b
 		if (p_provider == "openrouter") {
 			entry["name"] = model.get("name", model.get("id", ""));
 			entry["context"] = model.get("context_length", 0);
+			Dictionary architecture = model.get("architecture", Dictionary());
+			const String modality = String(architecture.get("modality", "")).to_lower();
+			Array input_modalities = architecture.get("input_modalities", Array());
+			bool supports_vision = modality.contains("image");
+			if (!supports_vision) {
+				for (int m = 0; m < input_modalities.size(); m++) {
+					if (String(input_modalities[m]).to_lower() == "image") {
+						supports_vision = true;
+						break;
+					}
+				}
+			}
+			if (!supports_vision) {
+				supports_vision = infer_model_supports_vision("openrouter", String(entry["id"]));
+			}
+			entry["supports_vision"] = supports_vision;
 			Dictionary pricing = model.get("pricing", Dictionary());
 			if (!pricing.is_empty()) {
 				entry["prompt_price"] = pricing.get("prompt", "");
@@ -784,6 +933,7 @@ Array AIOSProvider::parse_models(const String &p_provider, const Dictionary &p_b
 			entry["name"] = model.get("display_name", model.get("id", ""));
 			entry["context"] = model.get("max_input_tokens", 0);
 			entry["max_output"] = model.get("max_tokens", 0);
+			entry["supports_vision"] = true;
 		}
 		out.push_back(entry);
 	}

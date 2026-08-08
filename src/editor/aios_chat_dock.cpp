@@ -485,6 +485,9 @@ void AIOSChatDock::set_model_list(const Array &p_models, const String &p_selecte
 		if (context > 0) {
 			label += " (" + String::num_int64(context / 1000) + "k)";
 		}
+		if (m.has("supports_vision") && !(bool)m["supports_vision"]) {
+			label += " [text-only]";
+		}
 		model_selector->add_item(label);
 		model_selector->set_item_metadata(model_selector->get_item_count() - 1, id);
 		if (id == keep) {

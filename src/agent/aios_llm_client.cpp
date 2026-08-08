@@ -111,6 +111,7 @@ Error AIOSLlmClient::send_user_message(const String &p_text) {
 	history.push_back(message);
 
 	turn_count = 0; // A user prompt starts a new exchange.
+	pending_stripped_images = false;
 
 	Dictionary built = AIOSProvider::build_request(config, system_prompt, history, tools);
 	const String note = String(built["note"]);
@@ -142,7 +143,10 @@ Error AIOSLlmClient::send_tool_results(const Array &p_results) {
 	}
 
 	const Array assistant_ids = AIOSProvider::last_assistant_tool_use_ids(history);
-	const Array aligned = AIOSProvider::align_tool_results(p_results, assistant_ids);
+	Array aligned = AIOSProvider::align_tool_results(p_results, assistant_ids);
+	if (!config.vision_supported) {
+		aligned = AIOSProvider::strip_images_from_tool_results(aligned);
+	}
 	history.push_back(AIOSProvider::tool_result_message(aligned));
 
 	Dictionary built = AIOSProvider::build_request(config, system_prompt, history, tools);
@@ -248,6 +252,24 @@ void AIOSLlmClient::_on_request_completed(int p_result, int p_code, const Packed
 			_dispatch(retry_body, false);
 			return;
 		}
+		// OpenRouter text-only models reject screenshot payloads. Strip images from
+		// the pending tool results and retry once instead of aborting the run.
+		if (!pending_stripped_images && AIOSProvider::is_image_input_error(p_code, raw) && !history.is_empty()) {
+			Dictionary last = history[history.size() - 1];
+			if (String(last.get("role", "")) == "user") {
+				emit_signal("client_log", "warn",
+						"This model cannot accept images. Retrying without the screenshot payload — the PNG "
+						"path is still in the tool result.");
+				config.vision_supported = false;
+				Array content = last.get("content", Array());
+				last["content"] = AIOSProvider::strip_images_from_tool_results(content);
+				history[history.size() - 1] = last;
+				pending_stripped_images = true;
+				Dictionary built = AIOSProvider::build_request(config, system_prompt, history, tools);
+				_dispatch(built["body"], config.use_fallbacks && config.provider == "anthropic");
+				return;
+			}
+		}
 		_fail(AIOSProvider::parse_error(config.provider, p_code, raw));
 		return;
 	}
@@ -266,6 +288,8 @@ void AIOSLlmClient::_on_request_completed(int p_result, int p_code, const Packed
 	}
 
 	Dictionary result = envelope["result"];
+
+	pending_stripped_images = false;
 
 	// Append the assistant turn verbatim. On Anthropic this preserves thinking
 	// blocks with their signatures, which the API validates on the next turn —

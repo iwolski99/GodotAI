@@ -50,6 +50,7 @@ private:
 	// not have it, the API 400s; we retry once without rather than making the
 	// user discover a beta flag they never opted into.
 	bool pending_used_fallbacks = false;
+	bool pending_stripped_images = false;
 	Dictionary pending_body;
 
 	void _on_request_completed(int p_result, int p_code, const PackedStringArray &p_headers, const PackedByteArray &p_body);
@@ -73,6 +74,8 @@ public:
 	String get_system_prompt() const { return system_prompt; }
 	void set_tools(const Array &p_tools) { tools = p_tools; }
 	void set_max_turns(int p_turns) { max_turns = p_turns > 0 ? p_turns : 1; }
+	bool get_vision_supported() const { return config.vision_supported; }
+	void set_vision_supported(bool p_supported) { config.vision_supported = p_supported; }
 
 	// --- conversation ------------------------------------------------------
 	void reset_conversation();
