@@ -161,9 +161,15 @@ model's output cannot inject formatting or images into the editor UI.
 
 ## Asynchronous tools
 
-Every tool but one returns its result in the `response` to your `request`.
+Most tools return their result in the `response` to your `request`.
 
-`run_playtest` is the exception, because the thing it is reporting on has not
+`ask_user` is interactive: the built-in pipeline pauses and waits for the human's
+dock reply before synthesising a `tool_result`. Over IPC the call returns
+`{queued: true, questions: [...]}` immediately — your harness presents the
+questions and continues. Pair it with `commit_brief` to lock a 2D/3D design
+brief before mutating the project.
+
+`run_playtest` is asynchronous because the thing it is reporting on has not
 happened yet. The response acknowledges the launch:
 
 ```json

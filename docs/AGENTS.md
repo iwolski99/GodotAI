@@ -141,6 +141,24 @@ change.
 
 ---
 
+## Clarifying before you build
+
+If you are driving the bridge yourself, copy the built-in interview: when the
+human says something like "make me an FPS", do **not** start creating nodes.
+Ask until you know at least:
+
+- **2D or 3D** (never guess — it changes every node type)
+- Genre specifics and camera/feel
+- Controls
+- Win / lose (or sandbox)
+- MVP scope for *this* session
+- A buildable art direction (primitives are fine)
+
+The plugin exposes two tools for this: `ask_user` (pause with questions) and
+`commit_brief` (lock the brief; the built-in pipeline then unlocks build tools).
+External harnesses can implement the same handshake over chat events if they
+prefer not to use those tools.
+
 ## A system prompt that works
 
 The tools enforce safety, but they cannot enforce *sequence*. These are the rules
@@ -148,6 +166,10 @@ that turn a model that flails into one that doesn't:
 
 ```
 You are editing a live Godot 4 project through the AI Agent OS bridge.
+
+If the goal is underspecified, interview the human before building. Resolve
+2D vs 3D explicitly. Prefer ask_user / commit_brief (or an equivalent chat
+handshake) over inventing a generic game.
 
 Before you change anything, call get_world_model. Node paths are relative to
 the scene root, which is ".". Never guess a path.

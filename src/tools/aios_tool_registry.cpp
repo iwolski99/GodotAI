@@ -25,6 +25,8 @@ struct ToolInfo {
 // Order matters only for readability: this is what an agent sees from
 // list_tools, and it doubles as the plugin's public surface.
 static const ToolInfo TOOL_TABLE[] = {
+	{ "ask_user", "Pause and ask the human clarifying questions before building. Required when the goal is underspecified.", false },
+	{ "commit_brief", "Lock in a 2D/3D game design brief after clarification; unlocks build tools.", false },
 	{ "get_world_model", "Snapshot of the project: scene tree, node types, scripts, groups and the res:// inventory.", false },
 	{ "create_node_safe", "Instantiate a node under a parent with type-checked properties.", true },
 	{ "attach_script_safe", "Write a GDScript file and attach it to a node, verifying the base class first.", true },
@@ -77,6 +79,11 @@ bool AIOSToolRegistry::is_mutating(const String &p_tool) {
 		}
 	}
 	return false;
+}
+
+bool AIOSToolRegistry::is_clarify_phase_tool(const String &p_tool) {
+	return p_tool == "ask_user" || p_tool == "commit_brief" || p_tool == "get_world_model" ||
+			p_tool == "list_tools" || p_tool == "ping" || p_tool == "read_script" || p_tool == "open_scene";
 }
 
 Dictionary AIOSToolRegistry::_load_schema(const String &p_tool) {
@@ -149,7 +156,58 @@ Dictionary AIOSToolRegistry::call_tool(const String &p_tool, const Dictionary &p
 
 	const bool dry_run = AIOSJson::get_bool(p_params, "dry_run", false);
 
-	if (p_tool == "get_world_model") {
+	if (p_tool == "ask_user") {
+		// The in-editor pipeline intercepts this and pauses for a dock answer.
+		// External harnesses present the questions themselves and treat the
+		// returned payload as the interview turn.
+		Array questions = AIOSJson::get_array(p_params, "questions");
+		if (questions.is_empty()) {
+			envelope = AIOSJson::error("missing_parameter",
+					"'questions' must contain at least one question object with id and prompt.");
+		} else {
+			Dictionary result;
+			result["queued"] = true;
+			result["intro"] = AIOSJson::get_string(p_params, "intro", "");
+			result["questions"] = questions;
+			result["message"] =
+					"Present these questions to the human and continue with their answers. "
+					"Do not build until commit_brief has succeeded.";
+			envelope = AIOSJson::ok(result);
+		}
+	} else if (p_tool == "commit_brief") {
+		const String dimensions = AIOSJson::get_string(p_params, "dimensions", "").to_lower();
+		const String title = AIOSJson::get_string(p_params, "title", "");
+		const String summary = AIOSJson::get_string(p_params, "summary", "");
+		const String core_loop = AIOSJson::get_string(p_params, "core_loop", "");
+		const String scope = AIOSJson::get_string(p_params, "scope", "");
+		if (title.is_empty() || summary.is_empty() || core_loop.is_empty() || scope.is_empty()) {
+			envelope = AIOSJson::error("missing_parameter",
+					"commit_brief requires title, summary, core_loop and scope.");
+		} else if (dimensions != "2d" && dimensions != "3d") {
+			envelope = AIOSJson::error("invalid_dimensions",
+					"'dimensions' must be \"2d\" or \"3d\". Ask the human with ask_user if you do not know.");
+		} else {
+			Dictionary brief;
+			brief["title"] = title;
+			brief["dimensions"] = dimensions;
+			brief["genre"] = AIOSJson::get_string(p_params, "genre", "");
+			brief["summary"] = summary;
+			brief["core_loop"] = core_loop;
+			brief["controls"] = AIOSJson::get_string(p_params, "controls", "");
+			brief["win_lose"] = AIOSJson::get_string(p_params, "win_lose", "");
+			brief["scope"] = scope;
+			brief["art_direction"] = AIOSJson::get_string(p_params, "art_direction", "");
+			brief["technical_notes"] = AIOSJson::get_string(p_params, "technical_notes", "");
+			Dictionary result;
+			result["committed"] = true;
+			result["brief"] = brief;
+			result["message"] =
+					"Brief locked. Build tools are now available. Implement this brief; prefer the declared "
+					"2D or 3D node types (Node2D/CharacterBody2D vs Node3D/CharacterBody3D) and call "
+					"get_world_model before the first edit.";
+			envelope = AIOSJson::ok(result);
+		}
+	} else if (p_tool == "get_world_model") {
 		envelope = world_model.is_valid() ? world_model->get_world_model(p_params)
 										  : AIOSJson::error("not_initialised", "World model is unavailable.");
 	} else if (p_tool == "create_node_safe") {

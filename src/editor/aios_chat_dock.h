@@ -33,6 +33,7 @@ class AIOSChatDock : public Control {
 public:
 	enum State {
 		STATE_IDLE,
+		STATE_CLARIFYING,
 		STATE_PLANNING,
 		STATE_VALIDATING,
 		STATE_EXECUTING,
@@ -146,4 +147,7 @@ public:
 	void set_key_status(const String &p_provider, bool p_has_key, const String &p_redacted, bool p_from_env);
 
 	String get_selected_mode() const;
+
+	// Switches the Execute button / input placeholder for the clarification interview.
+	void set_clarifying_ui(bool p_clarifying);
 };

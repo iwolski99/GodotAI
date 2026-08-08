@@ -17,6 +17,8 @@ void AIOSPipeline::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("_on_playtest_finished", "report"), &AIOSPipeline::_on_playtest_finished);
 
 	ClassDB::bind_method(D_METHOD("start", "goal", "mode"), &AIOSPipeline::start);
+	ClassDB::bind_method(D_METHOD("continue_with_user_answer", "answer"), &AIOSPipeline::continue_with_user_answer);
+	ClassDB::bind_method(D_METHOD("skip_clarification_and_build"), &AIOSPipeline::skip_clarification_and_build);
 	ClassDB::bind_method(D_METHOD("stop"), &AIOSPipeline::stop);
 	ClassDB::bind_method(D_METHOD("poll", "delta"), &AIOSPipeline::poll);
 	ClassDB::bind_method(D_METHOD("get_stage_name"), &AIOSPipeline::get_stage_name);
@@ -24,6 +26,9 @@ void AIOSPipeline::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_max_repair_attempts", "attempts"), &AIOSPipeline::set_max_repair_attempts);
 	ClassDB::bind_method(D_METHOD("set_auto_playtest", "enabled"), &AIOSPipeline::set_auto_playtest);
 	ClassDB::bind_method(D_METHOD("set_auto_rollback", "enabled"), &AIOSPipeline::set_auto_rollback);
+	ClassDB::bind_method(D_METHOD("set_require_brief", "enabled"), &AIOSPipeline::set_require_brief);
+	ClassDB::bind_method(D_METHOD("is_clarifying"), &AIOSPipeline::is_clarifying);
+	ClassDB::bind_method(D_METHOD("is_awaiting_user"), &AIOSPipeline::is_awaiting_user);
 
 	ADD_SIGNAL(MethodInfo("stage_changed", PropertyInfo(Variant::STRING, "stage"), PropertyInfo(Variant::STRING, "detail")));
 	ADD_SIGNAL(MethodInfo("agent_message", PropertyInfo(Variant::STRING, "text")));
@@ -31,6 +36,8 @@ void AIOSPipeline::_bind_methods() {
 	ADD_SIGNAL(MethodInfo("pipeline_log", PropertyInfo(Variant::STRING, "level"), PropertyInfo(Variant::STRING, "message")));
 	ADD_SIGNAL(MethodInfo("tool_invoked", PropertyInfo(Variant::STRING, "tool"), PropertyInfo(Variant::DICTIONARY, "params")));
 	ADD_SIGNAL(MethodInfo("tool_completed", PropertyInfo(Variant::STRING, "tool"), PropertyInfo(Variant::BOOL, "ok"), PropertyInfo(Variant::DICTIONARY, "envelope")));
+	ADD_SIGNAL(MethodInfo("user_questions_requested", PropertyInfo(Variant::DICTIONARY, "payload")));
+	ADD_SIGNAL(MethodInfo("brief_committed", PropertyInfo(Variant::DICTIONARY, "brief")));
 	ADD_SIGNAL(MethodInfo("run_finished", PropertyInfo(Variant::DICTIONARY, "summary")));
 }
 
@@ -54,6 +61,8 @@ void AIOSPipeline::setup(const Ref<AIOSToolRegistry> &p_registry,
 
 String AIOSPipeline::get_stage_name() const {
 	switch (stage) {
+		case STAGE_CLARIFYING:
+			return "CLARIFYING";
 		case STAGE_PLANNING:
 			return "PLANNING";
 		case STAGE_VALIDATING:
@@ -88,6 +97,11 @@ Dictionary AIOSPipeline::get_status() const {
 	d["last_good_snapshot"] = last_good_snapshot.substr(0, 8);
 	d["auto_playtest"] = auto_playtest;
 	d["auto_rollback"] = auto_rollback;
+	d["require_brief"] = require_brief;
+	d["clarifying"] = is_clarifying();
+	d["awaiting_user"] = awaiting_user;
+	d["brief_ready"] = brief_ready;
+	d["brief"] = committed_brief;
 	return d;
 }
 
@@ -199,14 +213,142 @@ String AIOSPipeline::build_rollback_notice(const String &p_reason, const String 
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Clarification helpers                                                      */
+/* -------------------------------------------------------------------------- */
+
+bool AIOSPipeline::_mode_requires_brief(const String &p_mode) const {
+	if (!require_brief) {
+		return false;
+	}
+	const String m = p_mode.to_lower();
+	// Debugger and playtester work on an existing game; interviewing would be noise.
+	return m == "architect" || m == "coder" || m.is_empty();
+}
+
+void AIOSPipeline::_apply_tools_for_phase() {
+	if (llm == nullptr || !registry.is_valid()) {
+		return;
+	}
+
+	Array manifest = registry->list_tools();
+	Array tools;
+	for (int i = 0; i < manifest.size(); i++) {
+		Dictionary entry = manifest[i];
+		const String name = String(entry["name"]);
+		if (is_clarifying() && !AIOSToolRegistry::is_clarify_phase_tool(name)) {
+			continue;
+		}
+		Dictionary tool;
+		tool["name"] = name;
+		tool["description"] = entry["summary"];
+		tool["input_schema"] = entry.has("input_schema") ? entry["input_schema"] : Variant(Dictionary());
+		tools.push_back(tool);
+	}
+	llm->set_tools(tools);
+}
+
+String AIOSPipeline::_format_brief(const Dictionary &p_brief) {
+	String out;
+	out += "Title: " + String(p_brief.get("title", "")) + "\n";
+	out += "Dimensions: " + String(p_brief.get("dimensions", "")).to_upper() + "\n";
+	if (!String(p_brief.get("genre", "")).is_empty()) {
+		out += "Genre: " + String(p_brief["genre"]) + "\n";
+	}
+	out += "Summary: " + String(p_brief.get("summary", "")) + "\n";
+	out += "Core loop: " + String(p_brief.get("core_loop", "")) + "\n";
+	if (!String(p_brief.get("controls", "")).is_empty()) {
+		out += "Controls: " + String(p_brief["controls"]) + "\n";
+	}
+	if (!String(p_brief.get("win_lose", "")).is_empty()) {
+		out += "Win/lose: " + String(p_brief["win_lose"]) + "\n";
+	}
+	out += "Scope: " + String(p_brief.get("scope", "")) + "\n";
+	if (!String(p_brief.get("art_direction", "")).is_empty()) {
+		out += "Art: " + String(p_brief["art_direction"]) + "\n";
+	}
+	if (!String(p_brief.get("technical_notes", "")).is_empty()) {
+		out += "Technical notes: " + String(p_brief["technical_notes"]) + "\n";
+	}
+	return out;
+}
+
+Dictionary AIOSPipeline::_minimal_brief_from_goal(const String &p_goal) {
+	Dictionary brief;
+	brief["title"] = "Untitled prototype";
+	brief["dimensions"] = "2d";
+	brief["genre"] = "";
+	brief["summary"] = p_goal;
+	brief["core_loop"] = "Implement a playable slice matching the user's request as closely as possible.";
+	brief["controls"] = "Use Godot's default ui_* actions unless the request specifies otherwise.";
+	brief["win_lose"] = "Define a simple win or fail condition if the genre implies one; otherwise sandbox.";
+	brief["scope"] = "Ship a small playable MVP in this session: one main scene, player control, and one core interaction. "
+					 "Prefer placeholders over missing art.";
+	brief["art_direction"] = "Primitive shapes and clear colours; no external asset dependency.";
+	brief["technical_notes"] =
+			"Defaulting to 2D because the interview was skipped. Switch to 3D node types only if the "
+			"original request clearly requires 3D.";
+	const String lower = p_goal.to_lower();
+	if (lower.contains("3d") || lower.contains("first person") || lower.contains("first-person") ||
+			lower.contains("fps") || lower.contains("third person") || lower.contains("third-person")) {
+		brief["dimensions"] = "3d";
+		brief["technical_notes"] =
+				"Using 3D node types (Node3D / CharacterBody3D / Camera3D) because the request implies a 3D game.";
+	}
+	return brief;
+}
+
+void AIOSPipeline::_enter_build_phase(const Dictionary &p_brief, bool p_skipped_interview) {
+	committed_brief = p_brief;
+	brief_ready = true;
+	clarifying = false;
+	awaiting_user = false;
+	ask_user_tool_use_id = String();
+	pending_questions.clear();
+
+	const bool git_ok = git.is_valid() && git->is_available();
+	if (llm != nullptr) {
+		llm->set_system_prompt(build_system_prompt(mode, git_ok, false));
+	}
+	_apply_tools_for_phase();
+
+	emit_signal("brief_committed", committed_brief);
+	emit_signal("pipeline_log", "success",
+			p_skipped_interview
+					? "Interview skipped. Building from a minimal brief derived from your goal."
+					: "Brief locked. Build tools unlocked — implementing now.");
+	emit_signal("agent_message", String("**Game brief**\n\n") + _format_brief(committed_brief));
+}
+
+/* -------------------------------------------------------------------------- */
 /*  System prompt                                                              */
 /* -------------------------------------------------------------------------- */
 
-String AIOSPipeline::build_system_prompt(const String &p_mode, bool p_git_available) {
+String AIOSPipeline::build_system_prompt(const String &p_mode, bool p_git_available, bool p_clarifying) {
 	String prompt =
 			"You are an autonomous game developer working inside the Godot 4 editor through the AI Agent OS "
 			"plugin. You have tools that read and modify a live Godot project. The human can see everything you "
 			"do in a dock and can stop you at any time.\n\n";
+
+	if (p_clarifying) {
+		prompt +=
+				"## Clarification phase (you are here now)\n\n"
+				"The human's goal is not yet a build brief. Your job is to interview them until you can write "
+				"a precise brief for a 2D or 3D game, then lock it with commit_brief. Build tools are withheld "
+				"until that happens — you cannot create nodes or scripts yet.\n\n"
+				"Rules for this phase:\n"
+				"1. If the goal is vague (e.g. \"make me an FPS\", \"make a platformer\", \"build a game\"), "
+				"call ask_user with focused questions. Do NOT invent a generic game and start building.\n"
+				"2. Always resolve 2D vs 3D. Never guess. Also cover genre specifics, controls, win/lose, "
+				"MVP scope, and a buildable art direction.\n"
+				"3. Ask 2–5 questions per turn. Prefer multiple-choice options plus freeform. Follow up if "
+				"answers are still thin.\n"
+				"4. When — and only when — you have enough to build well, call commit_brief with dimensions "
+				"set to \"2d\" or \"3d\". Summarise the brief in plain language for the human as you do.\n"
+				"5. If the human already gave a complete brief (dimensions, loop, controls, scope), call "
+				"commit_brief immediately without asking filler questions.\n"
+				"6. You may call get_world_model to see what already exists in the project before deciding "
+				"what to ask.\n\n";
+	}
 
 	prompt +=
 			"## How your work is executed\n\n"
@@ -230,6 +372,8 @@ String AIOSPipeline::build_system_prompt(const String &p_mode, bool p_git_availa
 			"## Rules that will save you a cycle\n\n"
 			"Call get_world_model before your first edit and after anything unexpected. Node paths are relative "
 			"to the scene root, which is \".\". Never guess a path.\n\n"
+			"Choose 2D or 3D node families deliberately from the committed brief: Node2D/CharacterBody2D/"
+			"Camera2D for 2D, Node3D/CharacterBody3D/Camera3D for 3D. Do not mix them without a reason.\n\n"
 			"Scene edits live in the editor's memory until you call save_scene. Call it once at the end of a "
 			"coherent batch of edits - not after every node, and never forget it, because an unsaved scene is "
 			"not captured by a snapshot.\n\n"
@@ -298,6 +442,12 @@ Dictionary AIOSPipeline::start(const String &p_goal, const String &p_mode) {
 	pending_results.clear();
 	deferred_calls.clear();
 	awaiting_playtest = false;
+	awaiting_user = false;
+	ask_user_tool_use_id = String();
+	pending_questions.clear();
+	committed_brief.clear();
+	brief_ready = false;
+	clarifying = _mode_requires_brief(mode);
 
 	const bool git_ok = git.is_valid() && git->is_available();
 	if (!git_ok) {
@@ -317,31 +467,124 @@ Dictionary AIOSPipeline::start(const String &p_goal, const String &p_mode) {
 	}
 
 	llm->reset_conversation();
-	llm->set_system_prompt(build_system_prompt(mode, git_ok));
-	if (registry.is_valid()) {
-		// Hand the model the same manifest external agents get, so the two
-		// paths cannot drift apart.
-		Array manifest = registry->list_tools();
-		Array tools;
-		for (int i = 0; i < manifest.size(); i++) {
-			Dictionary entry = manifest[i];
-			Dictionary tool;
-			tool["name"] = entry["name"];
-			tool["description"] = entry["summary"];
-			tool["input_schema"] = entry.has("input_schema") ? entry["input_schema"] : Variant(Dictionary());
-			tools.push_back(tool);
-		}
-		llm->set_tools(tools);
-	}
+	llm->set_system_prompt(build_system_prompt(mode, git_ok, clarifying));
+	_apply_tools_for_phase();
 
-	_set_stage(STAGE_PLANNING, "sending the goal to " + llm->describe_target());
-	llm->send_user_message(p_goal);
+	if (clarifying) {
+		_set_stage(STAGE_CLARIFYING, "interviewing before build — answer in the box below");
+		emit_signal("pipeline_log", "info",
+				"Clarifying what to build first. Answer the agent's questions, or press Skip & Build.");
+		String kickoff = p_goal;
+		kickoff += "\n\n[System: You are in the clarification phase. If this goal needs more detail, call "
+				   "ask_user. If it is already a complete brief including 2D vs 3D, call commit_brief "
+				   "immediately. Do not invent a generic game.]";
+		llm->send_user_message(kickoff);
+	} else {
+		_set_stage(STAGE_PLANNING, "sending the goal to " + llm->describe_target());
+		llm->send_user_message(p_goal);
+	}
 
 	Dictionary result;
 	result["goal"] = goal;
 	result["mode"] = mode;
 	result["model"] = llm->describe_target();
 	result["git"] = git_ok;
+	result["clarifying"] = clarifying;
+	return AIOSJson::ok(result);
+}
+
+Dictionary AIOSPipeline::continue_with_user_answer(const String &p_answer) {
+	if (!awaiting_user) {
+		return AIOSJson::error("not_awaiting_user",
+				"The agent is not waiting for an answer right now.");
+	}
+	if (llm == nullptr) {
+		return AIOSJson::error("no_model", "The language-model client is unavailable.");
+	}
+	if (llm->is_busy()) {
+		return AIOSJson::error("busy", "A model request is already in flight.");
+	}
+
+	const String answer = p_answer.strip_edges();
+	if (answer.is_empty()) {
+		return AIOSJson::error("empty_answer", "Type an answer before sending.");
+	}
+
+	awaiting_user = false;
+	_set_stage(STAGE_CLARIFYING, "incorporating your answers");
+
+	if (!ask_user_tool_use_id.is_empty()) {
+		Dictionary payload;
+		payload["answered"] = true;
+		payload["raw_answer"] = answer;
+		payload["questions"] = pending_questions.get("questions", Array());
+		payload["intro"] = pending_questions.get("intro", "");
+
+		Dictionary block;
+		block["type"] = "tool_result";
+		block["tool_use_id"] = ask_user_tool_use_id;
+		block["content"] = JSON::stringify(payload);
+
+		Array results;
+		results.push_back(block);
+		// Any calls that were queued behind ask_user are abandoned: the model
+		// should react to the answers on the next turn, not continue a plan
+		// drafted before it heard the human.
+		deferred_calls.clear();
+		pending_results.clear();
+		ask_user_tool_use_id = String();
+		pending_questions.clear();
+
+		llm->send_tool_results(results);
+	} else {
+		// Freeform: the model asked in prose without ask_user.
+		llm->send_user_message(answer);
+	}
+
+	Dictionary result;
+	result["accepted"] = true;
+	return AIOSJson::ok(result);
+}
+
+Dictionary AIOSPipeline::skip_clarification_and_build() {
+	if (!is_clarifying() && !awaiting_user) {
+		return AIOSJson::error("not_clarifying",
+				"Nothing to skip — the agent is not in the clarification interview.");
+	}
+	if (llm == nullptr || !llm->is_configured()) {
+		return AIOSJson::error("no_model",
+				"No model is configured. Open the AI Agent dock's Settings panel and add an API key.");
+	}
+	if (llm->is_busy()) {
+		llm->cancel();
+	}
+
+	// Drop any open ask_user tool_use by resetting the conversation. Leaving an
+	// unanswered tool_use in history makes Anthropic reject the next request.
+	const String original_goal = goal;
+	Dictionary brief = _minimal_brief_from_goal(original_goal);
+	_enter_build_phase(brief, true);
+
+	pending_results.clear();
+	deferred_calls.clear();
+	awaiting_playtest = false;
+
+	const bool git_ok = git.is_valid() && git->is_available();
+	llm->reset_conversation();
+	llm->set_system_prompt(build_system_prompt(mode, git_ok, false));
+	_apply_tools_for_phase();
+
+	_set_stage(STAGE_PLANNING, "building from the skipped-interview brief");
+	String message =
+			"Original goal: " + original_goal + "\n\n"
+			"The human skipped the clarification interview. Build the best playable MVP you can from this "
+			"brief. Prefer asking nothing further unless a single critical choice is still impossible.\n\n";
+	message += _format_brief(brief);
+	llm->send_user_message(message);
+
+	Dictionary result;
+	result["skipped"] = true;
+	result["brief"] = brief;
 	return AIOSJson::ok(result);
 }
 
@@ -356,8 +599,13 @@ void AIOSPipeline::stop() {
 		playtest->stop();
 	}
 	awaiting_playtest = false;
+	awaiting_user = false;
+	ask_user_tool_use_id = String();
+	pending_questions.clear();
 	pending_results.clear();
 	deferred_calls.clear();
+	clarifying = false;
+	brief_ready = false;
 	_set_stage(STAGE_IDLE, "stopped by user");
 	emit_signal("pipeline_log", "warn",
 			"Run stopped. The project was left exactly as it is - nothing was rolled back. "
@@ -384,6 +632,8 @@ void AIOSPipeline::_abort(const String &p_code, const String &p_message) {
 	summary["filesystem_changed"] = steps_executed > 0;
 	emit_signal("run_finished", summary);
 	stage = STAGE_IDLE;
+	clarifying = false;
+	awaiting_user = false;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -406,6 +656,24 @@ void AIOSPipeline::_on_model_response(const Dictionary &p_response) {
 
 	Array calls = p_response.get("tool_calls", Array());
 	if (calls.is_empty()) {
+		if (is_clarifying()) {
+			// The model asked in prose or summarised without tools. Wait for
+			// the human rather than ending the run — that is how "make me an
+			// FPS" becomes a real brief instead of silence.
+			awaiting_user = true;
+			ask_user_tool_use_id = String();
+			pending_questions.clear();
+			_set_stage(STAGE_CLARIFYING, "waiting for your answers in the box below");
+			Dictionary payload;
+			payload["intro"] = text;
+			payload["questions"] = Array();
+			payload["freeform"] = true;
+			emit_signal("user_questions_requested", payload);
+			emit_signal("pipeline_log", "info",
+					"Answer in the prompt box, or press Skip & Build to proceed with a minimal brief.");
+			return;
+		}
+
 		// No tool calls means the model considers the task finished.
 		_set_stage(STAGE_IDLE, "done");
 
@@ -443,7 +711,15 @@ void AIOSPipeline::_handle_tool_calls(const Array &p_calls) {
 	// calls that only make sense together (create a node, then attach its
 	// script); rolling back to the middle of that would leave a half-built
 	// scene that is worse than either end state.
-	if (git.is_valid() && git->is_available()) {
+	bool may_mutate = false;
+	for (int i = 0; i < p_calls.size(); i++) {
+		Dictionary call = p_calls[i];
+		if (AIOSToolRegistry::is_mutating(String(call.get("name", "")))) {
+			may_mutate = true;
+			break;
+		}
+	}
+	if (may_mutate && git.is_valid() && git->is_available()) {
 		Dictionary snap = git->create_snapshot("before step " + String::num_int64(steps_executed + 1));
 		if ((bool)snap["ok"]) {
 			step_snapshot = String(Dictionary(snap["result"])["sha"]);
@@ -458,17 +734,17 @@ void AIOSPipeline::_handle_tool_calls(const Array &p_calls) {
 	for (int i = 0; i < p_calls.size(); i++) {
 		Dictionary call = p_calls[i];
 
-		if (awaiting_playtest) {
-			// Everything after a playtest call has to wait for its report —
-			// running further edits while the game is mid-run would change the
-			// files under it and make the diagnostics meaningless.
+		if (awaiting_playtest || awaiting_user) {
+			// Everything after a playtest or an ask_user call waits for the
+			// human/runtime to finish — continuing would change the world under
+			// an answer that has not arrived yet.
 			deferred_calls.push_back(call);
 			continue;
 		}
 		_execute_call(call);
 	}
 
-	if (!awaiting_playtest) {
+	if (!awaiting_playtest && !awaiting_user) {
 		_finish_turn();
 	}
 }
@@ -480,8 +756,23 @@ void AIOSPipeline::_execute_call(const Dictionary &p_call) {
 
 	emit_signal("tool_invoked", tool, params);
 
+	// Soft gate: even if a mutating tool somehow appears in the clarifying
+	// tool list, refuse it until the brief is locked.
+	if (is_clarifying() && !AIOSToolRegistry::is_clarify_phase_tool(tool)) {
+		_set_stage(STAGE_CLARIFYING, "refused " + tool + " until the brief is committed");
+		Dictionary details;
+		details["tool"] = tool;
+		Dictionary envelope = AIOSJson::error("brief_required",
+				"Build tools are locked until you finish interviewing the human and call commit_brief. "
+				"Use ask_user for remaining questions, or commit_brief if you already have enough detail.",
+				details);
+		emit_signal("tool_completed", tool, false, envelope);
+		_push_result(id, envelope["error"], true);
+		return;
+	}
+
 	// --- Validate ----------------------------------------------------------
-	_set_stage(STAGE_VALIDATING, tool);
+	_set_stage(is_clarifying() ? STAGE_CLARIFYING : STAGE_VALIDATING, tool);
 	Dictionary validation = AIOSValidator::validate_planned_call(tool, params);
 	Dictionary validation_result = validation["result"];
 	Array findings = validation_result["findings"];
@@ -508,6 +799,61 @@ void AIOSPipeline::_execute_call(const Dictionary &p_call) {
 	for (int i = 0; i < findings.size(); i++) {
 		Dictionary f = findings[i];
 		emit_signal("pipeline_log", "warn", tool + String(": ") + String(f["message"]));
+	}
+
+	// --- ask_user is special: pause for the dock ---------------------------
+	if (tool == "ask_user") {
+		Dictionary envelope = registry->call_tool(tool, params);
+		const bool ok = envelope.has("ok") && (bool)envelope["ok"];
+		emit_signal("tool_completed", tool, ok, envelope);
+		if (!ok) {
+			_push_result(id, envelope["error"], true);
+			return;
+		}
+
+		awaiting_user = true;
+		ask_user_tool_use_id = id;
+		pending_questions = params;
+		_set_stage(STAGE_CLARIFYING, "waiting for your answers");
+		emit_signal("user_questions_requested", params);
+
+		// Surface the questions in chat even if the dock listener is slow.
+		String visible = AIOSJson::get_string(params, "intro", "");
+		if (!visible.is_empty()) {
+			visible += "\n\n";
+		}
+		Array questions = AIOSJson::get_array(params, "questions");
+		for (int i = 0; i < questions.size(); i++) {
+			Dictionary q = questions[i];
+			visible += String::num_int64(i + 1) + ". " + String(q.get("prompt", "")) + "\n";
+			Array options = AIOSJson::get_array(q, "options");
+			for (int j = 0; j < options.size(); j++) {
+				visible += "   - " + String(options[j]) + "\n";
+			}
+		}
+		if (!visible.is_empty()) {
+			emit_signal("agent_message", visible);
+		}
+		emit_signal("pipeline_log", "info",
+				"Your turn — answer in the prompt box, or press Skip & Build.");
+		return;
+	}
+
+	// --- commit_brief unlocks the build phase ------------------------------
+	if (tool == "commit_brief") {
+		Dictionary envelope = registry->call_tool(tool, params);
+		const bool ok = envelope.has("ok") && (bool)envelope["ok"];
+		emit_signal("tool_completed", tool, ok, envelope);
+		if (!ok) {
+			_push_result(id, envelope["error"], true);
+			return;
+		}
+
+		Dictionary result = envelope["result"];
+		Dictionary brief = result.get("brief", Dictionary());
+		_enter_build_phase(brief, false);
+		_push_result(id, result, false);
+		return;
 	}
 
 	// --- Playtest is special: it is asynchronous ---------------------------
@@ -555,6 +901,19 @@ void AIOSPipeline::_push_result(const String &p_id, const Dictionary &p_payload,
 /* -------------------------------------------------------------------------- */
 
 void AIOSPipeline::_finish_turn() {
+	// Clarifying turns do not mutate the scene; skip the expensive sweep and
+	// keep the stage label honest for the dock.
+	if (is_clarifying() || (!brief_ready && clarifying)) {
+		if (pending_results.is_empty()) {
+			_set_stage(STAGE_CLARIFYING, "waiting for the next interview step");
+			return;
+		}
+		_set_stage(STAGE_CLARIFYING, "sending your answers back to the model");
+		llm->send_tool_results(pending_results);
+		pending_results.clear();
+		return;
+	}
+
 	// --- post-execution scene sweep ----------------------------------------
 	// Individually valid edits can still combine into a broken scene: a delete
 	// that orphans a NodePath another step set. This is the check that catches
@@ -687,8 +1046,8 @@ void AIOSPipeline::_on_playtest_finished(const Dictionary &p_report) {
 	deferred_calls.clear();
 	for (int i = 0; i < queued.size(); i++) {
 		_execute_call(queued[i]);
-		if (awaiting_playtest) {
-			// A second playtest in the same batch: stop again and wait.
+		if (awaiting_playtest || awaiting_user) {
+			// A second playtest or an ask_user in the same batch: stop and wait.
 			for (int j = i + 1; j < queued.size(); j++) {
 				deferred_calls.push_back(queued[j]);
 			}

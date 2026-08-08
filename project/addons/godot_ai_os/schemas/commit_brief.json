@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "commit_brief",
+  "title": "commit_brief",
+  "description": "Lock in the game design brief after clarifying with the human. Call this only when you have enough detail to build well — including whether the game is 2D or 3D. After this succeeds, the build tools unlock and you should implement the brief. Never invent a generic game to fill gaps; ask_user first.",
+  "mutating": false,
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["title", "dimensions", "summary", "core_loop", "scope"],
+  "properties": {
+    "title": {
+      "type": "string",
+      "description": "Short working title for the game."
+    },
+    "dimensions": {
+      "type": "string",
+      "enum": ["2d", "3d"],
+      "description": "Whether this is a 2D or 3D Godot project. Required — never guess."
+    },
+    "genre": {
+      "type": "string",
+      "description": "Genre label, e.g. 'first-person shooter', 'top-down puzzle', 'side-scrolling platformer'."
+    },
+    "summary": {
+      "type": "string",
+      "description": "One-paragraph description of what the player experiences."
+    },
+    "core_loop": {
+      "type": "string",
+      "description": "The repeating gameplay loop in a few sentences."
+    },
+    "controls": {
+      "type": "string",
+      "description": "How the player moves and acts (keys, mouse, touch)."
+    },
+    "win_lose": {
+      "type": "string",
+      "description": "Win and fail conditions, or 'sandbox / no win state' if none."
+    },
+    "scope": {
+      "type": "string",
+      "description": "Concrete MVP for this session: scenes, systems, and what is deliberately out of scope."
+    },
+    "art_direction": {
+      "type": "string",
+      "description": "Visual style: primitives, palette, camera feel. Prefer buildable placeholders over asset wishlists."
+    },
+    "technical_notes": {
+      "type": "string",
+      "description": "Godot-specific choices: root node types, physics bodies, scene layout."
+    }
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "committed": { "type": "boolean" },
+      "brief": { "type": "object" },
+      "message": { "type": "string" }
+    }
+  }
+}

@@ -66,6 +66,7 @@ void AIOSChatDock::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_model_list", "models", "selected"), &AIOSChatDock::set_model_list);
 	ClassDB::bind_method(D_METHOD("set_key_status", "provider", "has_key", "redacted", "from_env"), &AIOSChatDock::set_key_status);
 	ClassDB::bind_method(D_METHOD("get_selected_mode"), &AIOSChatDock::get_selected_mode);
+	ClassDB::bind_method(D_METHOD("set_clarifying_ui", "clarifying"), &AIOSChatDock::set_clarifying_ui);
 
 	ADD_SIGNAL(MethodInfo("prompt_submitted", PropertyInfo(Variant::STRING, "text"), PropertyInfo(Variant::STRING, "mode")));
 	ADD_SIGNAL(MethodInfo("execute_plan_requested", PropertyInfo(Variant::STRING, "mode")));
@@ -144,7 +145,7 @@ void AIOSChatDock::_build_ui() {
 
 	// --- input -------------------------------------------------------------
 	input = memnew(TextEdit);
-	input->set_placeholder("Describe what to build. Enter sends, Shift+Enter adds a line.");
+	input->set_placeholder("Describe what to build — the agent will ask questions before coding. Enter sends, Shift+Enter adds a line.");
 	input->set_custom_minimum_size(Vector2(0, 76));
 	input->set_line_wrapping_mode(TextEdit::LINE_WRAPPING_BOUNDARY);
 	input->connect("gui_input", Callable(this, "_on_input_gui_input"));
@@ -172,7 +173,9 @@ void AIOSChatDock::_build_ui() {
 
 	execute_button = memnew(Button);
 	execute_button->set_text("Execute Plan");
-	execute_button->set_tooltip_text("Tell the agent to execute the plan it just proposed.");
+	execute_button->set_tooltip_text(
+			"During clarification: skip the interview and build from a minimal brief. "
+			"Otherwise: tell an external agent to execute its current plan.");
 	execute_button->connect("pressed", Callable(this, "_on_execute_pressed"));
 	actions->add_child(execute_button);
 
@@ -778,6 +781,8 @@ void AIOSChatDock::clear_history() {
 
 Color AIOSChatDock::_state_color(State p_state) {
 	switch (p_state) {
+		case STATE_CLARIFYING:
+			return Color(0.78f, 0.62f, 0.95f);
 		case STATE_PLANNING:
 			return Color(0.62f, 0.72f, 1.0f);
 		case STATE_VALIDATING:
@@ -797,6 +802,8 @@ Color AIOSChatDock::_state_color(State p_state) {
 
 String AIOSChatDock::_state_name(State p_state) {
 	switch (p_state) {
+		case STATE_CLARIFYING:
+			return "CLARIFYING";
 		case STATE_PLANNING:
 			return "PLANNING";
 		case STATE_VALIDATING:
@@ -817,7 +824,9 @@ String AIOSChatDock::_state_name(State p_state) {
 void AIOSChatDock::set_state_name(const String &p_state, const String &p_detail) {
 	const String upper = p_state.to_upper();
 	State next = STATE_IDLE;
-	if (upper == "PLANNING") {
+	if (upper == "CLARIFYING") {
+		next = STATE_CLARIFYING;
+	} else if (upper == "PLANNING") {
 		next = STATE_PLANNING;
 	} else if (upper == "VALIDATING") {
 		next = STATE_VALIDATING;
@@ -838,6 +847,32 @@ void AIOSChatDock::set_state_name(const String &p_state, const String &p_detail)
 	}
 	if (detail_label != nullptr) {
 		detail_label->set_text(p_detail);
+	}
+
+	set_clarifying_ui(next == STATE_CLARIFYING);
+}
+
+void AIOSChatDock::set_clarifying_ui(bool p_clarifying) {
+	if (execute_button != nullptr) {
+		if (p_clarifying) {
+			execute_button->set_text("Skip & Build");
+			execute_button->set_tooltip_text(
+					"Skip the interview and build immediately from a minimal brief derived from your goal.");
+		} else {
+			execute_button->set_text("Execute Plan");
+			execute_button->set_tooltip_text(
+					"Tell an external agent to execute the plan it just proposed.");
+		}
+	}
+	if (input != nullptr) {
+		input->set_placeholder(p_clarifying
+						? "Answer the agent's questions here. Enter sends, Shift+Enter adds a line."
+						: "Describe what to build — the agent will ask questions before coding. Enter sends, Shift+Enter adds a line.");
+	}
+	if (send_button != nullptr) {
+		send_button->set_tooltip_text(p_clarifying
+						? "Send your answers to the agent (Enter)."
+						: "Send the prompt to the connected agent (Enter).");
 	}
 }
 

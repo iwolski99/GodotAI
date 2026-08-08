@@ -101,6 +101,11 @@ whether they work. Full write-up: **[docs/PIPELINE.md](PIPELINE.md)**.
 
 Making it something other people can rely on.
 
+- [x] **Clarify-before-build interview** — architect/coder modes ask focused
+  questions (including 2D vs 3D) via `ask_user` until `commit_brief` locks a
+  design brief; mutating tools stay withheld until then. Dock shows
+  `CLARIFYING`, routes answers into the open interview, and offers
+  **Skip & Build**.
 - Agent roles with distinct tool permissions (an Architect that cannot write
   files; a Debugger that cannot delete)
 - Plan review: the agent proposes a sequence, the human approves it in the dock,

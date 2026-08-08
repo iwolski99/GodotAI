@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "ask_user",
+  "title": "ask_user",
+  "description": "Pause and ask the human clarifying questions before building. Use this when the goal is underspecified (for example 'make me an FPS'). Present 1–5 focused questions covering 2D vs 3D, genre specifics, controls, win/lose conditions, scope, and look. The pipeline waits for answers and returns them as the tool result. Do not call mutating build tools until you have called commit_brief.",
+  "mutating": false,
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["questions"],
+  "properties": {
+    "intro": {
+      "type": "string",
+      "description": "One or two sentences of context shown above the questions."
+    },
+    "questions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "prompt"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Short stable id for this question, e.g. 'dimensions' or 'controls'."
+          },
+          "prompt": {
+            "type": "string",
+            "description": "The question to ask the human."
+          },
+          "options": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Optional suggested answers the human can pick from or ignore."
+          },
+          "allow_freeform": {
+            "type": "boolean",
+            "default": true,
+            "description": "Whether answers outside the options are welcome. Default true."
+          }
+        }
+      }
+    }
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "answered": { "type": "boolean" },
+      "raw_answer": { "type": "string" },
+      "questions": { "type": "array" }
+    }
+  }
+}

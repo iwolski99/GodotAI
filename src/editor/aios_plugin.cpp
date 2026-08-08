@@ -40,6 +40,7 @@
 #define SETTING_MAX_REPAIRS "ai_agent_os/agent/max_repair_attempts"
 #define SETTING_AUTO_PLAYTEST "ai_agent_os/agent/auto_playtest"
 #define SETTING_AUTO_ROLLBACK "ai_agent_os/agent/auto_rollback"
+#define SETTING_REQUIRE_BRIEF "ai_agent_os/agent/require_brief"
 
 // Effort is stored as an index so Project Settings can render it as a dropdown;
 // this is the mapping to the strings both APIs actually take.
@@ -128,6 +129,7 @@ void AIOSPlugin::_register_project_settings() {
 	_setting(SETTING_MAX_REPAIRS, 3, Variant::INT);
 	_setting(SETTING_AUTO_PLAYTEST, true, Variant::BOOL);
 	_setting(SETTING_AUTO_ROLLBACK, true, Variant::BOOL);
+	_setting(SETTING_REQUIRE_BRIEF, true, Variant::BOOL);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -192,6 +194,7 @@ void AIOSPlugin::_apply_model_settings() {
 		pipeline->set_max_repair_attempts((int)(int64_t)ps->get_setting(SETTING_MAX_REPAIRS, 3));
 		pipeline->set_auto_playtest((bool)ps->get_setting(SETTING_AUTO_PLAYTEST, true));
 		pipeline->set_auto_rollback((bool)ps->get_setting(SETTING_AUTO_ROLLBACK, true));
+		pipeline->set_require_brief((bool)ps->get_setting(SETTING_REQUIRE_BRIEF, true));
 	}
 	if (dock != nullptr) {
 		dock->set_settings(settings);
@@ -345,7 +348,9 @@ void AIOSPlugin::_enter_tree() {
 	_apply_model_settings();
 
 	if (llm->is_configured()) {
-		dock->append_log("info", "Built-in agent ready: " + llm->describe_target() + ". Type a goal and press Enter.");
+		dock->append_log("info",
+				"Built-in agent ready: " + llm->describe_target() +
+						". Type a goal — it will ask clarifying questions before building.");
 	} else {
 		dock->append_log("info", "No API key set yet. Open Settings in this dock to add one, or connect an external agent over the bridge.");
 	}
@@ -522,6 +527,22 @@ void AIOSPlugin::_on_prompt_submitted(const String &p_text, const String &p_mode
 	// a deliberate act, and silently routing the prompt to an external client
 	// instead would make that configuration look broken.
 	if (llm != nullptr && llm->is_configured()) {
+		// During the clarification interview, Send continues the conversation
+		// instead of starting a brand-new run that would discard the brief.
+		if (pipeline.is_valid() && pipeline->is_awaiting_user()) {
+			Dictionary continued = pipeline->continue_with_user_answer(p_text);
+			if (!(bool)continued["ok"]) {
+				Dictionary error = continued["error"];
+				dock->append_log("error", String(error["message"]));
+			}
+			return;
+		}
+		if (pipeline.is_valid() && pipeline->is_clarifying() && !pipeline->is_awaiting_user()) {
+			dock->append_log("warn",
+					"The agent is still thinking. Wait for its questions, or press Skip & Build.");
+			return;
+		}
+
 		Dictionary started = pipeline->start(p_text, p_mode);
 		if (!(bool)started["ok"]) {
 			Dictionary error = started["error"];
@@ -545,6 +566,17 @@ void AIOSPlugin::_on_prompt_submitted(const String &p_text, const String &p_mode
 }
 
 void AIOSPlugin::_on_execute_plan_requested(const String &p_mode) {
+	// During clarification the button is "Skip & Build": jump straight to a
+	// minimal brief so the human is never trapped in an interview they do not want.
+	if (pipeline.is_valid() && (pipeline->is_clarifying() || pipeline->is_awaiting_user())) {
+		Dictionary skipped = pipeline->skip_clarification_and_build();
+		if (!(bool)skipped["ok"]) {
+			Dictionary error = skipped["error"];
+			dock->append_log("error", String(error["message"]));
+		}
+		return;
+	}
+
 	Dictionary data;
 	data["mode"] = p_mode;
 	ipc->broadcast_event("execute_plan", data);

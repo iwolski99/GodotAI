@@ -260,7 +260,7 @@ near-passthrough and OpenRouter requests are translated on the way out and back.
 | `src/vcs/aios_git_checkpoint.*` | `git` subprocess wrapper; cross-platform git discovery; snapshots, ancestor-guarded hard reset, revert-based rollback. |
 | `src/validate/aios_validator.*` | The Validate stage. In-memory GDScript compilation, NodePath resolution, property type checks, whole-scene sweep. |
 | `src/playtest/aios_playtest.*` | The Observe stage. Child-process launch, `--log-file` tailing, diagnostic parsing. |
-| `src/pipeline/aios_pipeline.*` | The loop itself, and the prompt-wrapper builders that feed failures back to the model. |
+| `src/pipeline/aios_pipeline.*` | The loop itself: clarification interview, then Plan→Validate→Execute→Observe→Repair, plus the prompt-wrapper builders that feed failures back to the model. |
 | `src/agent/aios_provider.*` | Request building and response normalisation for Anthropic and OpenRouter. |
 | `src/agent/aios_llm_client.*` | Async HTTP transport, conversation history, model listing. |
 | `src/agent/aios_credentials.*` | Encrypted API key store in `user://`; environment variables take priority. |

@@ -49,4 +49,9 @@ public:
 	// True for tools that change project state — these get a checkpoint and
 	// invalidate the world model.
 	static bool is_mutating(const String &p_tool);
+
+	// Tools allowed while the built-in agent is still interviewing the human
+	// about what to build. Mutating scene/script tools are withheld until
+	// commit_brief succeeds.
+	static bool is_clarify_phase_tool(const String &p_tool);
 };
