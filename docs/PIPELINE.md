@@ -265,9 +265,10 @@ finish_turn():
         repair_attempts += 1
         stage = REPAIRING
 
-        if repair_attempts >= max_repair_attempts and auto_rollback and step_snapshot:
-            git.reset_to_snapshot(step_snapshot)   # hard reset; safe, see below
-            abort("repair_budget_exhausted")       # hand control to the human
+        if repair_attempts >= max_repair_attempts:
+            if auto_rollback and step_snapshot:
+                git.reset_to_snapshot(step_snapshot)   # hard reset; safe, see below
+            abort("repair_budget_exhausted")           # always; auto_rollback only chooses cleanup
             return
 
         send sweep findings back as text + pending results
