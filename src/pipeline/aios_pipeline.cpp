@@ -459,7 +459,7 @@ void AIOSPipeline::reset_session() {
 		stop();
 	}
 
-	goal.clear();
+	goal = String();
 	mode = "architect";
 	committed_brief.clear();
 	brief_ready = false;
