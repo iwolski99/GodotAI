@@ -70,11 +70,13 @@ public:
 	Dictionary get_config() const { return config.to_dict(); }
 
 	void set_system_prompt(const String &p_prompt) { system_prompt = p_prompt; }
+	String get_system_prompt() const { return system_prompt; }
 	void set_tools(const Array &p_tools) { tools = p_tools; }
 	void set_max_turns(int p_turns) { max_turns = p_turns > 0 ? p_turns : 1; }
 
 	// --- conversation ------------------------------------------------------
 	void reset_conversation();
+	void restore_conversation(const Array &p_history, int p_turn_count, const String &p_system_prompt);
 	Array get_history() const { return history; }
 	int get_turn_count() const { return turn_count; }
 

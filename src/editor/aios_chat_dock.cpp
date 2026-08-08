@@ -76,6 +76,7 @@ void AIOSChatDock::_bind_methods() {
 	ADD_SIGNAL(MethodInfo("stop_requested"));
 	ADD_SIGNAL(MethodInfo("rollback_requested"));
 	ADD_SIGNAL(MethodInfo("history_cleared"));
+	ADD_SIGNAL(MethodInfo("history_changed"));
 	ADD_SIGNAL(MethodInfo("settings_changed", PropertyInfo(Variant::DICTIONARY, "settings")));
 	ADD_SIGNAL(MethodInfo("api_key_submitted", PropertyInfo(Variant::STRING, "provider"), PropertyInfo(Variant::STRING, "key")));
 	ADD_SIGNAL(MethodInfo("api_key_cleared", PropertyInfo(Variant::STRING, "provider")));
@@ -665,6 +666,19 @@ String AIOSChatDock::get_selected_mode() const {
 	return mode_selector->get_item_text(mode_selector->get_selected()).to_lower();
 }
 
+void AIOSChatDock::set_selected_mode(const String &p_mode) {
+	if (mode_selector == nullptr || p_mode.is_empty()) {
+		return;
+	}
+	const String target = p_mode.to_lower();
+	for (int i = 0; i < mode_selector->get_item_count(); i++) {
+		if (mode_selector->get_item_text(i).to_lower() == target) {
+			mode_selector->select(i);
+			break;
+		}
+	}
+}
+
 /* -------------------------------------------------------------------------- */
 /*  Rendering                                                                  */
 /* -------------------------------------------------------------------------- */
@@ -706,8 +720,10 @@ void AIOSChatDock::_append_line(const String &p_bbcode) {
 	if (history == nullptr) {
 		return;
 	}
+	history_storage += p_bbcode + String("\n");
 	history->append_text(p_bbcode + String("\n"));
 	message_count++;
+	emit_signal("history_changed");
 }
 
 void AIOSChatDock::append_user(const String &p_text) {
@@ -797,9 +813,21 @@ void AIOSChatDock::clear_history() {
 	if (history != nullptr) {
 		history->clear();
 	}
+	history_storage = String();
 	message_count = 0;
 	append_log("info", "History cleared.");
 	emit_signal("history_cleared");
+}
+
+void AIOSChatDock::restore_history_text(const String &p_bbcode, int p_message_count) {
+	history_storage = p_bbcode;
+	message_count = p_message_count > 0 ? p_message_count : 0;
+	if (history != nullptr) {
+		history->clear();
+		if (!p_bbcode.is_empty()) {
+			history->append_text(p_bbcode);
+		}
+	}
 }
 
 /* -------------------------------------------------------------------------- */

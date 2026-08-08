@@ -20,6 +20,8 @@ void AIOSLlmClient::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_tools", "tools"), &AIOSLlmClient::set_tools);
 	ClassDB::bind_method(D_METHOD("set_max_turns", "turns"), &AIOSLlmClient::set_max_turns);
 	ClassDB::bind_method(D_METHOD("reset_conversation"), &AIOSLlmClient::reset_conversation);
+	ClassDB::bind_method(D_METHOD("restore_conversation", "history", "turn_count", "system_prompt"),
+			&AIOSLlmClient::restore_conversation);
 	ClassDB::bind_method(D_METHOD("get_history"), &AIOSLlmClient::get_history);
 	ClassDB::bind_method(D_METHOD("get_turn_count"), &AIOSLlmClient::get_turn_count);
 	ClassDB::bind_method(D_METHOD("send_user_message", "text"), &AIOSLlmClient::send_user_message);
@@ -77,6 +79,13 @@ String AIOSLlmClient::describe_target() const {
 void AIOSLlmClient::reset_conversation() {
 	history.clear();
 	turn_count = 0;
+}
+
+void AIOSLlmClient::restore_conversation(const Array &p_history, int p_turn_count, const String &p_system_prompt) {
+	cancel();
+	history = p_history;
+	turn_count = p_turn_count > 0 ? p_turn_count : 0;
+	system_prompt = p_system_prompt;
 }
 
 /* -------------------------------------------------------------------------- */

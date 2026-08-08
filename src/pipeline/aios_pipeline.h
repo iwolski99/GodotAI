@@ -164,6 +164,10 @@ public:
 	// Clears session state so the next prompt starts a brand-new run.
 	void reset_session();
 
+	Dictionary export_session_state() const;
+	void import_session_state(const Dictionary &p_state);
+	void sync_session_tools();
+
 	// True when a prior prompt or handoff artifact should be preserved.
 	bool has_session_context() const;
 

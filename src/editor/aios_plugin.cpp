@@ -62,6 +62,7 @@ void AIOSPlugin::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("_on_stop_requested"), &AIOSPlugin::_on_stop_requested);
 	ClassDB::bind_method(D_METHOD("_on_rollback_requested"), &AIOSPlugin::_on_rollback_requested);
 	ClassDB::bind_method(D_METHOD("_on_history_cleared"), &AIOSPlugin::_on_history_cleared);
+	ClassDB::bind_method(D_METHOD("_on_history_changed"), &AIOSPlugin::_on_history_changed);
 	ClassDB::bind_method(D_METHOD("_on_scene_changed", "root"), &AIOSPlugin::_on_scene_changed);
 	ClassDB::bind_method(D_METHOD("_on_scene_saved", "path"), &AIOSPlugin::_on_scene_saved);
 
@@ -350,6 +351,7 @@ void AIOSPlugin::_enter_tree() {
 	dock->connect("stop_requested", Callable(this, "_on_stop_requested"));
 	dock->connect("rollback_requested", Callable(this, "_on_rollback_requested"));
 	dock->connect("history_cleared", Callable(this, "_on_history_cleared"));
+	dock->connect("history_changed", Callable(this, "_on_history_changed"));
 	dock->connect("settings_changed", Callable(this, "_on_settings_changed"));
 	dock->connect("api_key_submitted", Callable(this, "_on_api_key_submitted"));
 	dock->connect("api_key_cleared", Callable(this, "_on_api_key_cleared"));
@@ -386,6 +388,7 @@ void AIOSPlugin::_enter_tree() {
 
 	_start_transport();
 	_apply_model_settings();
+	_restore_chat_session();
 
 	if (llm->is_configured()) {
 		dock->append_log("info",
@@ -400,6 +403,8 @@ void AIOSPlugin::_enter_tree() {
 
 void AIOSPlugin::_exit_tree() {
 	set_process(false);
+
+	_save_chat_session();
 
 	// Stop the run before tearing anything down: the pipeline holds references
 	// to the registry and the playtest, and a playtest left running would
@@ -469,6 +474,14 @@ void AIOSPlugin::_process(double p_delta) {
 			last_reported_clients = clients;
 			dock->set_transport_info(ipc->is_running(), ipc->get_bind_address(), ipc->get_port(),
 					ipc->get_mode() == AIOSIpcServer::MODE_WEBSOCKET ? "websocket" : "tcp-jsonl", clients);
+		}
+	}
+
+	if (session_dirty) {
+		session_save_accumulator += p_delta;
+		if (session_save_accumulator >= 3.0) {
+			session_save_accumulator = 0.0;
+			_save_chat_session();
 		}
 	}
 }
@@ -685,7 +698,50 @@ void AIOSPlugin::_on_history_cleared() {
 	if (pipeline.is_valid()) {
 		pipeline->reset_session();
 	}
+	chat_session.clear();
+	session_dirty = false;
+	session_save_accumulator = 0.0;
 	dock->set_state_name("IDLE", "");
+}
+
+void AIOSPlugin::_on_history_changed() {
+	_mark_chat_session_dirty();
+}
+
+void AIOSPlugin::_mark_chat_session_dirty() {
+	session_dirty = true;
+}
+
+void AIOSPlugin::_save_chat_session() {
+	if (dock == nullptr) {
+		return;
+	}
+
+	Dictionary data = chat_session.capture(dock, llm, pipeline.ptr());
+	if (String(data.get("dock_text", "")).is_empty() && (!data.has("llm_history") || Array(data["llm_history"]).is_empty())) {
+		chat_session.clear();
+		session_dirty = false;
+		return;
+	}
+
+	if (chat_session.save(data)) {
+		session_dirty = false;
+	}
+}
+
+void AIOSPlugin::_restore_chat_session() {
+	if (dock == nullptr || !chat_session.exists()) {
+		return;
+	}
+
+	const Dictionary data = chat_session.load();
+	if (data.is_empty()) {
+		return;
+	}
+
+	if (chat_session.apply(data, dock, llm, pipeline.ptr())) {
+		dock->append_log("info", "Restored the previous chat session from the last editor run.");
+	}
 }
 
 void AIOSPlugin::_on_rollback_requested() {
@@ -873,6 +929,7 @@ void AIOSPlugin::_on_pipeline_run_finished(const Dictionary &p_summary) {
 	if (dock != nullptr) {
 		dock->append_log(ok ? "success" : "warn", String(p_summary.get("message", "Run finished.")));
 	}
+	_mark_chat_session_dirty();
 
 	// A run that touched the filesystem — a rollback, or scripts written to
 	// disk — leaves the editor's cached view stale until it rescans.

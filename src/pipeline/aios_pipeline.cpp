@@ -487,6 +487,49 @@ void AIOSPipeline::reset_session() {
 	}
 }
 
+Dictionary AIOSPipeline::export_session_state() const {
+	Dictionary d;
+	d["goal"] = goal;
+	d["mode"] = mode;
+	d["brief_ready"] = brief_ready;
+	d["committed_brief"] = committed_brief;
+	d["pending_plan"] = pending_plan;
+	d["awaiting_plan_approval"] = awaiting_plan_approval;
+	d["plan_approved"] = plan_approved;
+	d["clarifying"] = clarifying;
+	return d;
+}
+
+void AIOSPipeline::import_session_state(const Dictionary &p_state) {
+	if (p_state.is_empty()) {
+		return;
+	}
+
+	goal = String(p_state.get("goal", ""));
+	mode = String(p_state.get("mode", "architect"));
+	brief_ready = (bool)p_state.get("brief_ready", false);
+	committed_brief = p_state.get("committed_brief", Dictionary());
+	pending_plan = p_state.get("pending_plan", Dictionary());
+	awaiting_plan_approval = (bool)p_state.get("awaiting_plan_approval", false);
+	plan_approved = (bool)p_state.get("plan_approved", false);
+	clarifying = (bool)p_state.get("clarifying", false);
+
+	if (!committed_brief.is_empty()) {
+		brief_ready = true;
+		clarifying = false;
+	}
+
+	if (registry.is_valid()) {
+		registry->set_active_role(mode);
+	}
+}
+
+void AIOSPipeline::sync_session_tools() {
+	if (llm != nullptr && llm->is_configured()) {
+		_apply_tools_for_phase();
+	}
+}
+
 /* -------------------------------------------------------------------------- */
 /*  System prompt                                                              */
 /* -------------------------------------------------------------------------- */
