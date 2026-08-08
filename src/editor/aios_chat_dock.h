@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <godot_cpp/classes/accept_dialog.hpp>
 #include <godot_cpp/classes/button.hpp>
 #include <godot_cpp/classes/check_box.hpp>
 #include <godot_cpp/classes/control.hpp>
@@ -57,7 +58,8 @@ private:
 	Button *token_button = nullptr;
 	Button *settings_button = nullptr;
 
-	// --- settings panel ----------------------------------------------------
+	// --- settings dialog ---------------------------------------------------
+	AcceptDialog *settings_dialog = nullptr;
 	VBoxContainer *settings_panel = nullptr;
 	OptionButton *provider_selector = nullptr;
 	OptionButton *model_selector = nullptr;

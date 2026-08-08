@@ -543,6 +543,29 @@ void AIOSPipeline::_push_result(const String &p_id, const Dictionary &p_payload,
 	Dictionary block;
 	block["type"] = "tool_result";
 	block["tool_use_id"] = p_id;
+
+	// A screenshot has to reach the model as an actual image block, not as a
+	// base64 string buried in JSON — a model handed 400 KB of base64 text will
+	// dutifully try to read it as text and learn nothing.
+	if (!p_is_error && p_payload.has("image_base64")) {
+		Dictionary described = p_payload.duplicate();
+		const String base64 = described["image_base64"];
+		const String media_type = String(described.get("media_type", "image/png"));
+		// Strip the payload out of the JSON summary so it is not sent twice.
+		described.erase("image_base64");
+
+		Array content;
+		Dictionary text;
+		text["type"] = "text";
+		text["text"] = JSON::stringify(described);
+		content.push_back(text);
+		content.push_back(AIOSProvider::image_block(base64, media_type));
+
+		block["content"] = content;
+		pending_results.push_back(block);
+		return;
+	}
+
 	block["content"] = JSON::stringify(p_payload);
 	if (p_is_error) {
 		block["is_error"] = true;

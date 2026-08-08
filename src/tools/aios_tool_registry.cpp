@@ -5,7 +5,10 @@
 #include "aios_tool_registry.h"
 
 #include "../util/aios_json.h"
+#include "../assets/aios_asset_pipeline.h"
+#include "../assets/aios_blender_bridge.h"
 #include "../validate/aios_validator.h"
+#include "../vision/aios_vision.h"
 #include "aios_scene_tools.h"
 
 #include <godot_cpp/classes/file_access.hpp>
@@ -41,6 +44,11 @@ static const ToolInfo TOOL_TABLE[] = {
 	{ "validate_change", "Dry-run a planned tool call through the static checker without executing it.", false },
 	{ "validate_scene", "Sweep the open scene for dangling NodePaths, missing resources and broken scripts.", false },
 	{ "run_playtest", "Launch the game in a child process and return its runtime errors and stack traces.", false },
+	{ "capture_viewport_screenshot", "Take a picture of the editor viewport and look at it. Catches what no error message reports: bad lighting, misplaced geometry, broken layout.", false },
+	{ "generate_3d_asset", "Generate a 3D model from a text prompt via Meshy or Tripo3D, download it, and import it. Costs money per call.", true },
+	{ "import_asset_from_url", "Download any asset URL into the project and import it. Works with providers this plugin does not know about.", true },
+	{ "cleanup_mesh", "Run a mesh through headless Blender: reduce triangles, normalise scale, and tag collision geometry.", true },
+	{ "run_blender_script", "Execute a Blender Python script headless and import what it exports. For procedural geometry.", true },
 	{ "create_checkpoint", "Commit the current project state as a rollback point.", true },
 	{ "rollback_last", "Revert the most recent checkpoint.", true },
 	{ "list_tools", "This manifest, including the JSON schema of every tool.", false },
@@ -56,18 +64,31 @@ void AIOSToolRegistry::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_tool_schema", "tool"), &AIOSToolRegistry::get_tool_schema);
 	ClassDB::bind_method(D_METHOD("set_auto_checkpoint", "enabled"), &AIOSToolRegistry::set_auto_checkpoint);
 	ClassDB::bind_method(D_METHOD("is_auto_checkpoint"), &AIOSToolRegistry::is_auto_checkpoint);
+	ClassDB::bind_method(D_METHOD("set_billable_budget", "budget"), &AIOSToolRegistry::set_billable_budget);
+	ClassDB::bind_method(D_METHOD("get_billable_calls"), &AIOSToolRegistry::get_billable_calls);
+	ClassDB::bind_method(D_METHOD("reset_billable_calls"), &AIOSToolRegistry::reset_billable_calls);
 
 	ADD_SIGNAL(MethodInfo("tool_executed",
 			PropertyInfo(Variant::STRING, "tool"),
 			PropertyInfo(Variant::BOOL, "ok"),
 			PropertyInfo(Variant::DICTIONARY, "envelope")));
+
+	ADD_SIGNAL(MethodInfo("billable_call",
+			PropertyInfo(Variant::STRING, "tool"),
+			PropertyInfo(Variant::INT, "calls_made"),
+			PropertyInfo(Variant::INT, "budget")));
 }
 
 void AIOSToolRegistry::setup(const Ref<AIOSWorldModel> &p_world_model, const Ref<AIOSGitCheckpoint> &p_git,
-		const Ref<AIOSPlaytest> &p_playtest) {
+		const Ref<AIOSPlaytest> &p_playtest, AIOSAssetPipeline *p_assets) {
 	world_model = p_world_model;
 	git = p_git;
 	playtest = p_playtest;
+	asset_pipeline = p_assets;
+}
+
+bool AIOSToolRegistry::is_billable(const String &p_tool) {
+	return p_tool == "generate_3d_asset";
 }
 
 bool AIOSToolRegistry::is_mutating(const String &p_tool) {
@@ -149,6 +170,30 @@ Dictionary AIOSToolRegistry::call_tool(const String &p_tool, const Dictionary &p
 
 	const bool dry_run = AIOSJson::get_bool(p_params, "dry_run", false);
 
+	// --- cost guard --------------------------------------------------------
+	// Generation APIs bill per call. An agent in a repair loop that calls
+	// generate_3d_asset five times because the first result "looked wrong" is
+	// spending the user's money, and nothing else in the pipeline would stop
+	// it: the call succeeds every time, so there is no error to back off from.
+	if (is_billable(p_tool) && !dry_run) {
+		if (billable_budget >= 0 && billable_calls >= billable_budget) {
+			Dictionary details;
+			details["calls_made"] = billable_calls;
+			details["budget"] = billable_budget;
+			details["tool"] = p_tool;
+			envelope = AIOSJson::error("budget_exhausted",
+					"This session has already made " + String::num_int64(billable_calls) +
+							" paid generation call(s), which is the configured limit. Raise "
+							"ai_agent_os/assets/max_paid_calls in Project Settings if you want more, or "
+							"reuse an asset you already generated.",
+					details);
+			emit_signal("tool_executed", p_tool, false, envelope);
+			return envelope;
+		}
+		billable_calls++;
+		emit_signal("billable_call", p_tool, billable_calls, billable_budget);
+	}
+
 	if (p_tool == "get_world_model") {
 		envelope = world_model.is_valid() ? world_model->get_world_model(p_params)
 										  : AIOSJson::error("not_initialised", "World model is unavailable.");
@@ -176,6 +221,20 @@ Dictionary AIOSToolRegistry::call_tool(const String &p_tool, const Dictionary &p
 		envelope = AIOSSceneTools::save_scene(p_params);
 	} else if (p_tool == "open_scene") {
 		envelope = AIOSSceneTools::open_scene(p_params);
+	} else if (p_tool == "capture_viewport_screenshot") {
+		envelope = AIOSVision::capture_viewport_screenshot(p_params);
+	} else if (p_tool == "generate_3d_asset") {
+		envelope = asset_pipeline != nullptr
+				? asset_pipeline->generate_3d_asset(p_params)
+				: AIOSJson::error("not_initialised", "Asset generation is unavailable.");
+	} else if (p_tool == "import_asset_from_url") {
+		envelope = asset_pipeline != nullptr
+				? asset_pipeline->import_from_url(p_params)
+				: AIOSJson::error("not_initialised", "Asset importing is unavailable.");
+	} else if (p_tool == "cleanup_mesh") {
+		envelope = AIOSBlenderBridge::cleanup_mesh(p_params);
+	} else if (p_tool == "run_blender_script") {
+		envelope = AIOSBlenderBridge::run_script(p_params);
 	} else if (p_tool == "validate_change") {
 		envelope = AIOSValidator::validate_planned_call(
 				AIOSJson::get_string(p_params, "tool", ""),

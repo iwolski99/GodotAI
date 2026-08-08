@@ -7,6 +7,7 @@
 
 #include "../agent/aios_credentials.h"
 #include "../agent/aios_llm_client.h"
+#include "../assets/aios_asset_pipeline.h"
 #include "../ipc/aios_ipc_server.h"
 #include "../pipeline/aios_pipeline.h"
 #include "../playtest/aios_playtest.h"
@@ -31,6 +32,7 @@ private:
 	Ref<AIOSCredentials> credentials;
 	Ref<AIOSPipeline> pipeline;
 	AIOSLlmClient *llm = nullptr; // A child Node: HTTPRequest needs a tree.
+	AIOSAssetPipeline *assets = nullptr; // Ditto.
 	AIOSChatDock *dock = nullptr;
 
 	String session_token;
@@ -80,6 +82,13 @@ private:
 	// Playtest -> here
 	void _on_playtest_output(const String &p_stream, const String &p_line);
 	void _on_playtest_finished(const Dictionary &p_report);
+
+	// Asset pipeline -> here
+	void _on_asset_stage_changed(const String &p_stage, const String &p_detail);
+	void _on_asset_ready(const Dictionary &p_result);
+	void _on_asset_failed(const Dictionary &p_error);
+	void _on_asset_log(const String &p_level, const String &p_message);
+	void _on_billable_call(const String &p_tool, int p_calls, int p_budget);
 
 	// LLM client -> here
 	void _on_models_listed(const Array &p_models);

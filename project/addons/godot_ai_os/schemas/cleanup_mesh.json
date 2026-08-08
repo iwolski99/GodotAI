@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "cleanup_mesh",
+  "title": "cleanup_mesh",
+  "description": "Runs a mesh through headless Blender to make it usable in a game. Free — this is local processing, not an API call. A mesh straight out of a generation service is almost never shippable: it arrives at an arbitrary scale, with 100k+ triangles for something seen for two seconds, no collision, and an origin in an unhelpful place. This fixes all of that in one pass. Collision is produced the way Godot actually supports it: a decimated copy of the mesh is named with the suffix Godot's importer recognises (-convcol, -col, -colonly), so the engine builds the collision body itself at import time. Requires Blender installed and findable; check first if you are unsure, because the error is not recoverable by retrying.",
+  "mutating": true,
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path"],
+  "properties": {
+    "path": { "type": "string", "pattern": "^res://.+", "description": "Mesh to process (.glb/.gltf/.fbx/.obj)." },
+    "output": { "type": "string", "pattern": "^res://.+", "description": "Where to write the result. Defaults to overwriting 'path'. Blender writes to a temp file first, so a crash cannot truncate your input." },
+    "target_triangles": { "type": "integer", "minimum": 50, "description": "Decimate the visual mesh to roughly this count. This is the performance knob — a prop the player walks past rarely needs more than a few thousand." },
+    "collision": {
+      "type": "string",
+      "enum": ["none", "convex", "trimesh", "colonly"],
+      "default": "none",
+      "description": "convex: cheap hull, works for moving bodies, wrong for concave shapes. trimesh: accurate, static geometry only. colonly: collision with no visual mesh. none: skip."
+    },
+    "collision_triangles": { "type": "integer", "minimum": 20, "default": 500, "description": "Triangle budget for the collision proxy. Collision is never seen, so this should be far lower than the visual budget." },
+    "scale_to": { "type": "integer", "minimum": 1, "description": "Scale so the longest bounding-box edge is this many metres. The most valuable single fix for generated assets — services return wildly inconsistent scales." },
+    "center_origin": { "type": "boolean", "default": false, "description": "Move the origin to the centre of the footprint, on the floor, so position.y = 0 sits the object on the ground." },
+    "merge_by_distance_micrometres": { "type": "integer", "minimum": 0, "description": "Weld vertices closer than this many micrometres. Removes the duplicated seam vertices generators leave behind, which break smooth shading." },
+    "smooth_angle": { "type": "integer", "minimum": 1, "maximum": 180, "description": "Apply auto-smooth shading at this angle in degrees." }
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "path": { "type": "string" },
+      "blender": { "type": "string", "description": "The Blender executable that was used." },
+      "triangles_before": { "type": "integer" },
+      "triangles_after": { "type": "integer" },
+      "reduction_percent": { "type": "integer" },
+      "collision_generated": { "type": "boolean" },
+      "report": { "type": "object", "description": "The full per-step report from the Blender script." }
+    }
+  },
+  "errors": {
+    "blender_not_found": "Blender is not installed or not findable. Set GODOT_AI_OS_BLENDER, or Project Settings > Filesystem > Import > Blender > Blender Path.",
+    "file_not_found": "No mesh at that path.",
+    "blender_failed": "Blender exited non-zero; details.output_tail has the traceback. The input is unmodified.",
+    "no_result": "Blender ran but reported nothing parseable."
+  }
+}

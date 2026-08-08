@@ -7,6 +7,7 @@
 
 #include <godot_cpp/classes/ref_counted.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
+#include <godot_cpp/variant/packed_string_array.hpp>
 
 using namespace godot;
 
@@ -44,6 +45,10 @@ public:
 	// Environment variable consulted for each provider, checked before the
 	// stored file. Returns "" for an unknown provider.
 	static String env_var_for(const String &p_provider);
+
+	// Every provider this store knows about. p_kind filters to "model" (the LLM
+	// providers) or "asset" (the generation APIs); empty returns all of them.
+	static PackedStringArray known_providers(const String &p_kind = String());
 
 	// The key to use for a provider: environment variable first, then the
 	// encrypted store. Empty when neither has one.

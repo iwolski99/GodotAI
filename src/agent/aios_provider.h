@@ -84,6 +84,12 @@ public:
 	// Builds a canonical user message carrying tool results.
 	static Dictionary tool_result_message(const Array &p_results);
 
+	// A canonical (Anthropic-shaped) image block. OpenRouter requests translate
+	// this into OpenAI's image_url form on the way out — and, because the OpenAI
+	// schema forbids images inside a tool result, move it to a following user
+	// message. Callers do not need to care which provider is active.
+	static Dictionary image_block(const String &p_base64, const String &p_media_type);
+
 	// True when the provider/model pair supports a reasoning control at all.
 	static bool supports_reasoning(const AIOSProviderConfig &p_config);
 };

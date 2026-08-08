@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "generate_3d_asset",
+  "title": "generate_3d_asset",
+  "description": "Generates a 3D model from a text prompt using Meshy or Tripo3D, downloads it, and imports it into the project. THIS COSTS REAL MONEY at the provider, once per call, and the plugin enforces a per-session ceiling (ai_agent_os/assets/max_paid_calls). Do not call it speculatively, and do not re-call it because the first result 'looked wrong' — inspect what you got with capture_viewport_screenshot first. Generation is asynchronous and typically takes 30-120 seconds; the call returns as soon as the job is queued, and the finished path arrives as an 'asset_ready' event. Generated meshes arrive at arbitrary scale with no collision and a high triangle count, so run cleanup_mesh on the result before placing it in a scene.",
+  "mutating": true,
+  "billable": true,
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["prompt"],
+  "properties": {
+    "prompt": { "type": "string", "description": "What to generate. Concrete and physical works best: \"a rusted steel ammo crate with a hinged lid\" beats \"a container\"." },
+    "provider": { "type": "string", "enum": ["meshy", "tripo"], "default": "meshy" },
+    "name": { "type": "string", "description": "Filename stem for the imported asset. Defaults to a slug of the prompt." },
+    "target_dir": { "type": "string", "default": "res://assets/generated", "description": "Where to import it." },
+    "target_triangles": { "type": "integer", "minimum": 100, "description": "Ask the provider to remesh to roughly this budget. Better than decimating afterwards — the remesher knows the topology and preserves the silhouette." },
+    "art_style": { "type": "string", "default": "realistic", "description": "Provider-specific style hint (Meshy)." },
+    "cleanup": { "type": "boolean", "default": true, "description": "Flag the result as wanting a cleanup_mesh pass. Does not run it automatically — Blender may not be installed." },
+    "collision": { "type": "string", "enum": ["none", "convex", "trimesh", "colonly"], "default": "convex", "description": "Collision to request during the later cleanup pass." },
+    "timeout_sec": { "type": "integer", "minimum": 30, "maximum": 1800, "default": 600 }
+  },
+  "returns": {
+    "type": "object",
+    "description": "Immediate acknowledgement. The finished asset arrives as an 'asset_ready' event.",
+    "properties": {
+      "started": { "type": "boolean" },
+      "provider": { "type": "string" },
+      "prompt": { "type": "string" },
+      "name": { "type": "string" },
+      "target_dir": { "type": "string" }
+    }
+  },
+  "errors": {
+    "no_api_key": "No key for that provider. Add one in the dock's Settings or set the env var.",
+    "unknown_provider": "Provider is not one this plugin knows.",
+    "already_running": "An asset job is in flight; wait for it.",
+    "budget_exhausted": "The per-session paid-call limit has been reached.",
+    "generation_failed": "The provider could not generate that model.",
+    "timeout": "The job did not finish in time."
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "capture_viewport_screenshot",
+  "title": "capture_viewport_screenshot",
+  "description": "Takes a picture of the editor viewport and returns it as an image you can actually look at. run_playtest tells you whether the game errored; this tells you whether it looks right. Use it after building or arranging anything visual — it catches the failures that produce no diagnostic at all: a level with no lighting, a mesh at 50x scale, a player spawned inside the floor, UI stacked in one corner. The capture is the last frame the editor drew, which is exactly what the human is looking at. Images are downscaled before encoding, because a 4K frame costs thousands of tokens and tells you nothing a 1024px one does not.",
+  "mutating": false,
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {
+    "viewport": {
+      "type": "string",
+      "enum": ["3d", "2d"],
+      "default": "3d",
+      "description": "Which editor viewport to grab. Use \"2d\" for a 2D game or UI work."
+    },
+    "index": { "type": "integer", "minimum": 0, "maximum": 3, "default": 0, "description": "Which 3D viewport, when the editor is split into several." },
+    "max_edge": { "type": "integer", "minimum": 128, "maximum": 1568, "default": 1024, "description": "Longest edge in pixels after downscaling. Above ~1568 costs tokens without adding detail a model can use." },
+    "save_to": { "type": "string", "description": "Where to write the PNG. Defaults to user://godot_ai_os/screenshots/. Not required — the image is returned regardless." },
+    "include_base64": { "type": "boolean", "default": true, "description": "Include the image data in the reply. Turn off if you only want the file written." }
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "source": { "type": "string" },
+      "path": { "type": "string", "description": "Where the PNG was written." },
+      "width": { "type": "integer" },
+      "height": { "type": "integer" },
+      "original_width": { "type": "integer" },
+      "original_height": { "type": "integer" },
+      "resized": { "type": "boolean" },
+      "bytes": { "type": "integer" },
+      "media_type": { "type": "string" }
+    }
+  },
+  "errors": {
+    "no_frame": "Nothing has been rendered. This is always the case under --headless.",
+    "viewport_unavailable": "The editor has no viewport of that kind right now.",
+    "unknown_viewport": "'viewport' must be \"3d\" or \"2d\"."
+  }
+}

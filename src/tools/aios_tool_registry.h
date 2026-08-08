@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "../assets/aios_asset_pipeline.h"
 #include "../playtest/aios_playtest.h"
 #include "../vcs/aios_git_checkpoint.h"
 #include "../world/aios_world_model.h"
@@ -24,8 +25,13 @@ private:
 	Ref<AIOSWorldModel> world_model;
 	Ref<AIOSGitCheckpoint> git;
 	Ref<AIOSPlaytest> playtest;
+	AIOSAssetPipeline *asset_pipeline = nullptr; // Owned by the plugin's tree.
 	Dictionary schema_cache;
 	bool auto_checkpoint = true;
+
+	// Paid-API call accounting. -1 means unlimited.
+	int billable_calls = 0;
+	int billable_budget = 10;
 
 	Dictionary _load_schema(const String &p_tool);
 
@@ -34,7 +40,16 @@ protected:
 
 public:
 	void setup(const Ref<AIOSWorldModel> &p_world_model, const Ref<AIOSGitCheckpoint> &p_git,
-			const Ref<AIOSPlaytest> &p_playtest);
+			const Ref<AIOSPlaytest> &p_playtest, AIOSAssetPipeline *p_assets);
+
+	// Tools that spend real money at a real provider. Kept separate from
+	// "mutating" because the two properties are unrelated: a paid call can be
+	// read-only, and most mutating calls are free.
+	static bool is_billable(const String &p_tool);
+
+	void set_billable_budget(int p_budget) { billable_budget = p_budget; }
+	int get_billable_calls() const { return billable_calls; }
+	void reset_billable_calls() { billable_calls = 0; }
 
 	void set_auto_checkpoint(bool p_enabled) { auto_checkpoint = p_enabled; }
 	bool is_auto_checkpoint() const { return auto_checkpoint; }

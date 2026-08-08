@@ -6,7 +6,9 @@
 
 #include "../util/aios_json.h"
 
+#include <godot_cpp/classes/accept_dialog.hpp>
 #include <godot_cpp/classes/box_container.hpp>
+#include <godot_cpp/classes/margin_container.hpp>
 #include <godot_cpp/classes/display_server.hpp>
 #include <godot_cpp/classes/h_box_container.hpp>
 #include <godot_cpp/classes/input_event_key.hpp>
@@ -110,7 +112,6 @@ void AIOSChatDock::_build_ui() {
 	settings_button = memnew(Button);
 	settings_button->set_text("Settings");
 	settings_button->set_flat(true);
-	settings_button->set_toggle_mode(true);
 	settings_button->set_tooltip_text("Choose the model, reasoning depth and API key for the built-in agent.");
 	settings_button->connect("pressed", Callable(this, "_on_settings_toggled"));
 	header->add_child(settings_button);
@@ -128,9 +129,10 @@ void AIOSChatDock::_build_ui() {
 	header->add_child(connection_label);
 
 	// --- settings ----------------------------------------------------------
-	// Collapsed by default: it is configured once and then never touched, so it
-	// should not be spending vertical space in a dock this narrow.
-	_build_settings_panel(root);
+	// A dialog rather than a panel in the dock. Settings are configured once and
+	// then never touched, and this dock is often left at its minimum width where
+	// every row of settings is a row stolen from the chat history.
+	_build_settings_panel(nullptr);
 
 	// --- history -----------------------------------------------------------
 	history = memnew(RichTextLabel);
@@ -224,16 +226,26 @@ static void make_shrinkable(Control *p_control) {
 }
 
 void AIOSChatDock::_build_settings_panel(VBoxContainer *p_root) {
-	PanelContainer *frame = memnew(PanelContainer);
-	p_root->add_child(frame);
-	frame->set_visible(false);
+	(void)p_root; // The dialog is its own window; it does not live in the dock.
+
+	settings_dialog = memnew(AcceptDialog);
+	settings_dialog->set_title("AI Agent OS - Model Settings");
+	settings_dialog->set_ok_button_text("Done");
+	// Closing with Done is all there is: every control applies its change the
+	// moment it is edited, so there is no separate save step to get wrong.
+	settings_dialog->set_min_size(Vector2i(460, 0));
+	add_child(settings_dialog);
+
+	MarginContainer *margin = memnew(MarginContainer);
+	margin->add_theme_constant_override("margin_left", 8);
+	margin->add_theme_constant_override("margin_right", 8);
+	margin->add_theme_constant_override("margin_top", 4);
+	margin->add_theme_constant_override("margin_bottom", 4);
+	settings_dialog->add_child(margin);
 
 	settings_panel = memnew(VBoxContainer);
 	settings_panel->add_theme_constant_override("separation", 2);
-	frame->add_child(settings_panel);
-	// The frame is what gets shown and hidden; the panel is its only child, so
-	// toggling either works, but hiding the frame also hides its background.
-	settings_panel->set_meta("frame", frame);
+	margin->add_child(settings_panel);
 
 	// --- provider ----------------------------------------------------------
 	settings_panel->add_child(make_caption("Provider"));
@@ -492,13 +504,8 @@ void AIOSChatDock::_emit_settings() {
 }
 
 void AIOSChatDock::_on_settings_toggled() {
-	if (settings_panel == nullptr) {
-		return;
-	}
-	Object *frame = settings_panel->get_meta("frame");
-	Control *frame_control = Object::cast_to<Control>(frame);
-	if (frame_control != nullptr) {
-		frame_control->set_visible(settings_button->is_pressed());
+	if (settings_dialog != nullptr) {
+		settings_dialog->popup_centered();
 	}
 }
 

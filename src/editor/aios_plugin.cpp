@@ -41,6 +41,10 @@
 #define SETTING_AUTO_PLAYTEST "ai_agent_os/agent/auto_playtest"
 #define SETTING_AUTO_ROLLBACK "ai_agent_os/agent/auto_rollback"
 
+#define SETTING_ASSET_DIR "ai_agent_os/assets/target_directory"
+#define SETTING_MAX_PAID "ai_agent_os/assets/max_paid_calls"
+#define SETTING_ASSET_PROVIDER "ai_agent_os/assets/default_provider"
+
 // Effort is stored as an index so Project Settings can render it as a dropdown;
 // this is the mapping to the strings both APIs actually take.
 static const char *AIOS_EFFORT_NAMES[] = { "low", "medium", "high", "xhigh", "max" };
@@ -75,6 +79,12 @@ void AIOSPlugin::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("_on_playtest_output", "stream", "line"), &AIOSPlugin::_on_playtest_output);
 	ClassDB::bind_method(D_METHOD("_on_playtest_finished", "report"), &AIOSPlugin::_on_playtest_finished);
+
+	ClassDB::bind_method(D_METHOD("_on_asset_stage_changed", "stage", "detail"), &AIOSPlugin::_on_asset_stage_changed);
+	ClassDB::bind_method(D_METHOD("_on_asset_ready", "result"), &AIOSPlugin::_on_asset_ready);
+	ClassDB::bind_method(D_METHOD("_on_asset_failed", "error"), &AIOSPlugin::_on_asset_failed);
+	ClassDB::bind_method(D_METHOD("_on_asset_log", "level", "message"), &AIOSPlugin::_on_asset_log);
+	ClassDB::bind_method(D_METHOD("_on_billable_call", "tool", "calls", "budget"), &AIOSPlugin::_on_billable_call);
 }
 
 String AIOSPlugin::_get_plugin_name() const {
@@ -128,6 +138,12 @@ void AIOSPlugin::_register_project_settings() {
 	_setting(SETTING_MAX_REPAIRS, 3, Variant::INT);
 	_setting(SETTING_AUTO_PLAYTEST, true, Variant::BOOL);
 	_setting(SETTING_AUTO_ROLLBACK, true, Variant::BOOL);
+
+	// Generation APIs bill per call, so the ceiling is a setting rather than a
+	// constant. -1 disables the guard for anyone who would rather not be asked.
+	_setting(SETTING_ASSET_DIR, "res://assets/generated", Variant::STRING);
+	_setting(SETTING_MAX_PAID, 10, Variant::INT);
+	_setting(SETTING_ASSET_PROVIDER, 0, Variant::INT, "Meshy,Tripo3D");
 }
 
 /* -------------------------------------------------------------------------- */
@@ -291,7 +307,6 @@ void AIOSPlugin::_enter_tree() {
 	git->set_enabled((bool)ProjectSettings::get_singleton()->get_setting(SETTING_CHECKPOINT, true));
 	playtest.instantiate();
 	registry.instantiate();
-	registry->setup(world_model, git, playtest);
 	registry->set_auto_checkpoint((bool)ProjectSettings::get_singleton()->get_setting(SETTING_CHECKPOINT, true));
 	credentials.instantiate();
 	ipc.instantiate();
@@ -303,6 +318,14 @@ void AIOSPlugin::_enter_tree() {
 	llm->set_name("AIOSLlmClient");
 	add_child(llm);
 	llm->setup(credentials);
+
+	assets = memnew(AIOSAssetPipeline);
+	assets->set_name("AIOSAssetPipeline");
+	add_child(assets);
+	assets->setup(credentials);
+
+	registry->setup(world_model, git, playtest, assets);
+	registry->set_billable_budget((int)(int64_t)ProjectSettings::get_singleton()->get_setting(SETTING_MAX_PAID, 10));
 
 	pipeline.instantiate();
 	pipeline->setup(registry, git, playtest, llm);
@@ -326,6 +349,12 @@ void AIOSPlugin::_enter_tree() {
 	pipeline->connect("tool_invoked", Callable(this, "_on_pipeline_tool_invoked"));
 	pipeline->connect("tool_completed", Callable(this, "_on_pipeline_tool_completed"));
 	pipeline->connect("run_finished", Callable(this, "_on_pipeline_run_finished"));
+
+	assets->connect("asset_stage_changed", Callable(this, "_on_asset_stage_changed"));
+	assets->connect("asset_ready", Callable(this, "_on_asset_ready"));
+	assets->connect("asset_failed", Callable(this, "_on_asset_failed"));
+	assets->connect("asset_log", Callable(this, "_on_asset_log"));
+	registry->connect("billable_call", Callable(this, "_on_billable_call"));
 
 	playtest->connect("playtest_output", Callable(this, "_on_playtest_output"));
 	playtest->connect("playtest_finished", Callable(this, "_on_playtest_finished"));
@@ -371,6 +400,12 @@ void AIOSPlugin::_exit_tree() {
 		memdelete(llm);
 		llm = nullptr;
 	}
+	if (assets != nullptr) {
+		assets->cancel();
+		remove_child(assets);
+		memdelete(assets);
+		assets = nullptr;
+	}
 
 	if (ipc.is_valid()) {
 		ipc->stop();
@@ -398,6 +433,9 @@ void AIOSPlugin::_process(double p_delta) {
 	// transport was never started.
 	if (pipeline.is_valid()) {
 		pipeline->poll(p_delta);
+	}
+	if (assets != nullptr) {
+		assets->poll(p_delta);
 	}
 
 	if (ipc.is_null()) {
@@ -788,4 +826,71 @@ void AIOSPlugin::_on_playtest_finished(const Dictionary &p_report) {
 	if (ipc.is_valid() && ipc->get_client_count() > 0) {
 		ipc->broadcast_event("playtest_finished", p_report);
 	}
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Asset pipeline events                                                      */
+/* -------------------------------------------------------------------------- */
+
+void AIOSPlugin::_on_asset_stage_changed(const String &p_stage, const String &p_detail) {
+	if (dock != nullptr) {
+		// Asset generation runs alongside the agent pipeline rather than inside
+		// it, so it reports through the log rather than hijacking the stage
+		// header — otherwise a download would overwrite "EXECUTING".
+		dock->append_log("info", "Asset: " + p_stage.to_lower() + (p_detail.is_empty() ? String() : String(" - ") + p_detail));
+	}
+	if (ipc.is_valid() && ipc->get_client_count() > 0) {
+		Dictionary data;
+		data["stage"] = p_stage;
+		data["detail"] = p_detail;
+		ipc->broadcast_event("asset_stage", data);
+	}
+}
+
+void AIOSPlugin::_on_asset_ready(const Dictionary &p_result) {
+	const String path = String(p_result.get("path", ""));
+	if (dock != nullptr) {
+		dock->append_log("success", "Asset imported: " + path);
+		if ((bool)p_result.get("cleanup_requested", false)) {
+			dock->append_log("info",
+					"Run cleanup_mesh on it to reduce triangles and generate collision before using it in a scene.");
+		}
+	}
+	if (world_model.is_valid()) {
+		world_model->invalidate();
+	}
+	if (ipc.is_valid() && ipc->get_client_count() > 0) {
+		ipc->broadcast_event("asset_ready", p_result);
+	}
+}
+
+void AIOSPlugin::_on_asset_failed(const Dictionary &p_error) {
+	if (dock != nullptr) {
+		dock->append_log("error", "Asset generation failed: " + String(p_error.get("message", "")));
+	}
+	if (ipc.is_valid() && ipc->get_client_count() > 0) {
+		ipc->broadcast_event("asset_failed", p_error);
+	}
+}
+
+void AIOSPlugin::_on_asset_log(const String &p_level, const String &p_message) {
+	if (dock != nullptr) {
+		dock->append_log(p_level, p_message);
+	}
+}
+
+void AIOSPlugin::_on_billable_call(const String &p_tool, int p_calls, int p_budget) {
+	if (dock == nullptr) {
+		return;
+	}
+	// Spending is worth saying out loud every single time. The failure mode this
+	// guards against is a user discovering the cost after the fact.
+	String message = "Paid API call: " + p_tool + " (" + String::num_int64(p_calls);
+	if (p_budget >= 0) {
+		message += " of " + String::num_int64(p_budget) + " allowed this session";
+	} else {
+		message += ", no limit set";
+	}
+	message += ").";
+	dock->append_log("warn", message);
 }

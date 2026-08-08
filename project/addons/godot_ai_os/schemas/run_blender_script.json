@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "run_blender_script",
+  "title": "run_blender_script",
+  "description": "Runs a Blender Python (bpy) script headless and imports whatever it exports. Free. This is the procedural-geometry path, and it is worth being honest about what it is good for: generated bpy code produces good PARAMETRIC geometry — walls, floors, stairs, railings, platforms, modular kit pieces, anything describable as boxes and extrusions — and poor organic geometry. Do not try to model a character or a weapon this way; use generate_3d_asset for those. Your script receives '--output <abs path>' after a bare '--' when you pass the 'output' parameter, and should export there. Print a line starting with GODOT_AI_OS_RESULT followed by JSON to report structured results back.",
+  "mutating": true,
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["source"],
+  "properties": {
+    "source": { "type": "string", "description": "The complete bpy script. It runs with --factory-startup, so no user addons are loaded and the scene starts empty." },
+    "output": { "type": "string", "pattern": "^res://.+", "description": "Where the script should export. Passed to the script as --output; the file is imported afterwards." }
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "ran": { "type": "boolean" },
+      "output": { "type": "string" },
+      "written": { "type": "boolean", "description": "False means the script ran cleanly but exported nothing." },
+      "output_tail": { "type": "string", "description": "Last of Blender's stdout, for debugging." },
+      "report": { "type": "object", "description": "Parsed from a GODOT_AI_OS_RESULT line, if the script printed one." }
+    }
+  },
+  "errors": {
+    "blender_not_found": "Blender is not installed or not findable.",
+    "blender_failed": "The script raised; details.output_tail has the traceback."
+  }
+}

@@ -190,15 +190,73 @@ static Array to_openai_messages(const String &p_system, const Array &p_messages)
 			// per request rather than replaying it.
 		}
 
+		// Images that could not travel inside a tool result, to be sent as a
+		// follow-up user message. See the comment below.
+		Array orphaned_images;
+
 		for (int t = 0; t < tool_results.size(); t++) {
 			Dictionary block = tool_results[t];
 			Dictionary m;
 			m["role"] = "tool";
 			m["tool_call_id"] = block.get("tool_use_id", "");
+
 			Variant result_content = block.get("content", "");
-			m["content"] = result_content.get_type() == Variant::STRING
-					? String(result_content)
-					: JSON::stringify(result_content);
+			if (result_content.get_type() == Variant::STRING) {
+				m["content"] = String(result_content);
+			} else if (result_content.get_type() == Variant::ARRAY) {
+				// The OpenAI chat-completions schema requires a `tool` message's
+				// content to be a plain string — an image block is rejected
+				// outright. Anthropic allows images inside a tool_result, so the
+				// canonical history legitimately contains them.
+				//
+				// The workaround the OpenAI ecosystem settled on: keep the text
+				// in the tool message and re-send the image as a user message
+				// immediately after. The model sees both, in order.
+				Array inner = result_content;
+				String flat;
+				for (int k = 0; k < inner.size(); k++) {
+					if (Variant(inner[k]).get_type() != Variant::DICTIONARY) {
+						continue;
+					}
+					Dictionary ib = inner[k];
+					const String itype = String(ib.get("type", ""));
+					if (itype == "image") {
+						orphaned_images.push_back(ib);
+					} else if (itype == "text") {
+						if (!flat.is_empty()) {
+							flat += "\n";
+						}
+						flat += String(ib.get("text", ""));
+					}
+				}
+				if (orphaned_images.size() > 0 && flat.is_empty()) {
+					flat = "(screenshot returned; it follows as the next message)";
+				}
+				m["content"] = flat;
+			} else {
+				m["content"] = JSON::stringify(result_content);
+			}
+			out.push_back(m);
+		}
+
+		for (int im = 0; im < orphaned_images.size(); im++) {
+			Dictionary block = orphaned_images[im];
+			Dictionary source = block.get("source", Dictionary());
+
+			Dictionary url;
+			url["url"] = "data:" + String(source.get("media_type", "image/png")) +
+					";base64," + String(source.get("data", ""));
+
+			Dictionary part;
+			part["type"] = "image_url";
+			part["image_url"] = url;
+
+			Array parts;
+			parts.push_back(part);
+
+			Dictionary m;
+			m["role"] = "user";
+			m["content"] = parts;
 			out.push_back(m);
 		}
 
@@ -550,4 +608,16 @@ Array AIOSProvider::parse_models(const String &p_provider, const Dictionary &p_b
 		out.push_back(entry);
 	}
 	return out;
+}
+
+Dictionary AIOSProvider::image_block(const String &p_base64, const String &p_media_type) {
+	Dictionary source;
+	source["type"] = "base64";
+	source["media_type"] = p_media_type.is_empty() ? String("image/png") : p_media_type;
+	source["data"] = p_base64;
+
+	Dictionary block;
+	block["type"] = "image";
+	block["source"] = source;
+	return block;
 }

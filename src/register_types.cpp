@@ -6,6 +6,8 @@
 #include "register_types.h"
 
 #include "agent/aios_credentials.h"
+#include "assets/aios_asset_pipeline.h"
+#include "assets/aios_blender_bridge.h"
 #include "agent/aios_llm_client.h"
 #include "editor/aios_chat_dock.h"
 #include "editor/aios_plugin.h"
@@ -14,6 +16,7 @@
 #include "playtest/aios_playtest.h"
 #include "tools/aios_tool_registry.h"
 #include "validate/aios_validator.h"
+#include "vision/aios_vision.h"
 #include "vcs/aios_git_checkpoint.h"
 #include "world/aios_world_model.h"
 
@@ -37,6 +40,9 @@ void initialize_ai_agent_os_module(ModuleInitializationLevel p_level) {
 	GDREGISTER_CLASS(AIOSGitCheckpoint);
 	GDREGISTER_CLASS(AIOSValidator);
 	GDREGISTER_CLASS(AIOSPlaytest);
+	GDREGISTER_CLASS(AIOSVision);
+	GDREGISTER_CLASS(AIOSAssetPipeline);
+	GDREGISTER_CLASS(AIOSBlenderBridge);
 	GDREGISTER_CLASS(AIOSToolRegistry);
 	GDREGISTER_CLASS(AIOSCredentials);
 	GDREGISTER_CLASS(AIOSLlmClient);
