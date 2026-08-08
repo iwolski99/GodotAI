@@ -34,11 +34,13 @@ class AIOSChatDock : public Control {
 public:
 	enum State {
 		STATE_IDLE,
+		STATE_CLARIFYING,
 		STATE_PLANNING,
 		STATE_VALIDATING,
 		STATE_EXECUTING,
 		STATE_PLAYTESTING,
 		STATE_REPAIRING,
+		STATE_AWAITING_APPROVAL,
 		STATE_ERROR,
 	};
 
@@ -126,6 +128,7 @@ public:
 	void append_log(const String &p_level, const String &p_text);
 	void append_tool_call(const String &p_tool, const Dictionary &p_params);
 	void append_tool_result(const String &p_tool, bool p_ok, const Dictionary &p_envelope);
+	void append_diff_preview(const String &p_diff);
 	void clear_history();
 
 	// --- state -------------------------------------------------------------
@@ -148,4 +151,8 @@ public:
 	void set_key_status(const String &p_provider, bool p_has_key, const String &p_redacted, bool p_from_env);
 
 	String get_selected_mode() const;
+
+	// Switches the Execute button / input placeholder for the clarification interview.
+	void set_clarifying_ui(bool p_clarifying);
+	void set_plan_review_ui(bool p_awaiting_approval);
 };

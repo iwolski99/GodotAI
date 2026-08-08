@@ -64,4 +64,19 @@ public:
 	// True for tools that change project state — these get a checkpoint and
 	// invalidate the world model.
 	static bool is_mutating(const String &p_tool);
+
+	// Tools allowed while the built-in agent is still interviewing the human
+	// about what to build. Mutating scene/script tools are withheld until
+	// commit_brief succeeds.
+	static bool is_clarify_phase_tool(const String &p_tool);
+
+	// Role-based allowlist enforced for built-in agent modes and IPC when a role
+	// is set on the registry.
+	static bool is_allowed_for_role(const String &p_tool, const String &p_role);
+
+	void set_active_role(const String &p_role) { active_role = p_role; }
+	String get_active_role() const { return active_role; }
+
+private:
+	String active_role;
 };

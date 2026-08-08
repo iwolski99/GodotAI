@@ -40,6 +40,8 @@
 #define SETTING_MAX_REPAIRS "ai_agent_os/agent/max_repair_attempts"
 #define SETTING_AUTO_PLAYTEST "ai_agent_os/agent/auto_playtest"
 #define SETTING_AUTO_ROLLBACK "ai_agent_os/agent/auto_rollback"
+#define SETTING_REQUIRE_BRIEF "ai_agent_os/agent/require_brief"
+#define SETTING_REQUIRE_PLAN "ai_agent_os/agent/require_plan_approval"
 
 #define SETTING_ASSET_DIR "ai_agent_os/assets/target_directory"
 #define SETTING_MAX_PAID "ai_agent_os/assets/max_paid_calls"
@@ -75,6 +77,7 @@ void AIOSPlugin::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("_on_pipeline_log", "level", "message"), &AIOSPlugin::_on_pipeline_log);
 	ClassDB::bind_method(D_METHOD("_on_pipeline_tool_invoked", "tool", "params"), &AIOSPlugin::_on_pipeline_tool_invoked);
 	ClassDB::bind_method(D_METHOD("_on_pipeline_tool_completed", "tool", "ok", "envelope"), &AIOSPlugin::_on_pipeline_tool_completed);
+	ClassDB::bind_method(D_METHOD("_on_pipeline_plan_proposed", "plan", "diff_preview"), &AIOSPlugin::_on_pipeline_plan_proposed);
 	ClassDB::bind_method(D_METHOD("_on_pipeline_run_finished", "summary"), &AIOSPlugin::_on_pipeline_run_finished);
 
 	ClassDB::bind_method(D_METHOD("_on_playtest_output", "stream", "line"), &AIOSPlugin::_on_playtest_output);
@@ -138,6 +141,8 @@ void AIOSPlugin::_register_project_settings() {
 	_setting(SETTING_MAX_REPAIRS, 3, Variant::INT);
 	_setting(SETTING_AUTO_PLAYTEST, true, Variant::BOOL);
 	_setting(SETTING_AUTO_ROLLBACK, true, Variant::BOOL);
+	_setting(SETTING_REQUIRE_BRIEF, true, Variant::BOOL);
+	_setting(SETTING_REQUIRE_PLAN, false, Variant::BOOL);
 
 	// Generation APIs bill per call, so the ceiling is a setting rather than a
 	// constant. -1 disables the guard for anyone who would rather not be asked.
@@ -208,6 +213,8 @@ void AIOSPlugin::_apply_model_settings() {
 		pipeline->set_max_repair_attempts((int)(int64_t)ps->get_setting(SETTING_MAX_REPAIRS, 3));
 		pipeline->set_auto_playtest((bool)ps->get_setting(SETTING_AUTO_PLAYTEST, true));
 		pipeline->set_auto_rollback((bool)ps->get_setting(SETTING_AUTO_ROLLBACK, true));
+		pipeline->set_require_brief((bool)ps->get_setting(SETTING_REQUIRE_BRIEF, true));
+		pipeline->set_require_plan_approval((bool)ps->get_setting(SETTING_REQUIRE_PLAN, false));
 	}
 	if (dock != nullptr) {
 		dock->set_settings(settings);
@@ -309,6 +316,7 @@ void AIOSPlugin::_enter_tree() {
 	registry.instantiate();
 	registry->set_auto_checkpoint((bool)ProjectSettings::get_singleton()->get_setting(SETTING_CHECKPOINT, true));
 	credentials.instantiate();
+	memory.instantiate();
 	ipc.instantiate();
 
 	// The LLM client is a Node because HTTPRequest is: it needs a tree to
@@ -329,6 +337,7 @@ void AIOSPlugin::_enter_tree() {
 
 	pipeline.instantiate();
 	pipeline->setup(registry, git, playtest, llm);
+	pipeline->set_memory(memory);
 
 	dock = memnew(AIOSChatDock);
 	add_control_to_dock(EditorPlugin::DOCK_SLOT_RIGHT_UL, dock);
@@ -348,6 +357,7 @@ void AIOSPlugin::_enter_tree() {
 	pipeline->connect("pipeline_log", Callable(this, "_on_pipeline_log"));
 	pipeline->connect("tool_invoked", Callable(this, "_on_pipeline_tool_invoked"));
 	pipeline->connect("tool_completed", Callable(this, "_on_pipeline_tool_completed"));
+	pipeline->connect("plan_proposed", Callable(this, "_on_pipeline_plan_proposed"));
 	pipeline->connect("run_finished", Callable(this, "_on_pipeline_run_finished"));
 
 	assets->connect("asset_stage_changed", Callable(this, "_on_asset_stage_changed"));
@@ -374,7 +384,9 @@ void AIOSPlugin::_enter_tree() {
 	_apply_model_settings();
 
 	if (llm->is_configured()) {
-		dock->append_log("info", "Built-in agent ready: " + llm->describe_target() + ". Type a goal and press Enter.");
+		dock->append_log("info",
+				"Built-in agent ready: " + llm->describe_target() +
+						". Type a goal — it will ask clarifying questions before building.");
 	} else {
 		dock->append_log("info", "No API key set yet. Open Settings in this dock to add one, or connect an external agent over the bridge.");
 	}
@@ -502,6 +514,26 @@ void AIOSPlugin::_handle_request(int p_client_id, const Dictionary &p_message) {
 	const String tool = p_message.has("tool") ? String(p_message["tool"]) : String();
 	const Dictionary params = AIOSJson::get_dict(p_message, "params");
 
+	if (pipeline.is_valid() && pipeline->is_running() && AIOSToolRegistry::is_mutating(tool)) {
+		Dictionary response;
+		response["type"] = "response";
+		if (p_message.has("id")) {
+			response["id"] = p_message["id"];
+		}
+		response["tool"] = tool;
+		response["ok"] = false;
+		Dictionary details;
+		details["stage"] = pipeline->get_stage_name();
+		response["error"] = AIOSJson::error("driver_busy",
+				"The built-in agent pipeline is active (" + pipeline->get_stage_name() +
+						"). Stop it before external agents mutate the project.",
+				details)["error"];
+		ipc->send_to(p_client_id, response);
+		dock->append_log("warn",
+				vformat("Rejected mutating IPC call '%s' while the built-in agent is running.", tool));
+		return;
+	}
+
 	dock->append_tool_call(tool, params);
 
 	Dictionary envelope = registry->call_tool(tool, params);
@@ -560,6 +592,22 @@ void AIOSPlugin::_on_prompt_submitted(const String &p_text, const String &p_mode
 	// a deliberate act, and silently routing the prompt to an external client
 	// instead would make that configuration look broken.
 	if (llm != nullptr && llm->is_configured()) {
+		// During the clarification interview, Send continues the conversation
+		// instead of starting a brand-new run that would discard the brief.
+		if (pipeline.is_valid() && pipeline->is_awaiting_user()) {
+			Dictionary continued = pipeline->continue_with_user_answer(p_text);
+			if (!(bool)continued["ok"]) {
+				Dictionary error = continued["error"];
+				dock->append_log("error", String(error["message"]));
+			}
+			return;
+		}
+		if (pipeline.is_valid() && pipeline->is_clarifying() && !pipeline->is_awaiting_user()) {
+			dock->append_log("warn",
+					"The agent is still thinking. Wait for its questions, or press Skip & Build.");
+			return;
+		}
+
 		Dictionary started = pipeline->start(p_text, p_mode);
 		if (!(bool)started["ok"]) {
 			Dictionary error = started["error"];
@@ -583,6 +631,26 @@ void AIOSPlugin::_on_prompt_submitted(const String &p_text, const String &p_mode
 }
 
 void AIOSPlugin::_on_execute_plan_requested(const String &p_mode) {
+	// During clarification the button is "Skip & Build": jump straight to a
+	// minimal brief so the human is never trapped in an interview they do not want.
+	if (pipeline.is_valid() && (pipeline->is_clarifying() || pipeline->is_awaiting_user())) {
+		Dictionary skipped = pipeline->skip_clarification_and_build();
+		if (!(bool)skipped["ok"]) {
+			Dictionary error = skipped["error"];
+			dock->append_log("error", String(error["message"]));
+		}
+		return;
+	}
+
+	if (pipeline.is_valid() && pipeline->is_awaiting_plan_approval()) {
+		Dictionary approved = pipeline->approve_plan();
+		if (!(bool)approved["ok"]) {
+			Dictionary error = approved["error"];
+			dock->append_log("error", String(error["message"]));
+		}
+		return;
+	}
+
 	Dictionary data;
 	data["mode"] = p_mode;
 	ipc->broadcast_event("execute_plan", data);
@@ -774,6 +842,13 @@ void AIOSPlugin::_on_pipeline_tool_completed(const String &p_tool, bool p_ok, co
 		data["revision"] = world_model->get_revision();
 		data["cause"] = p_tool;
 		ipc->broadcast_event("world_changed", data);
+	}
+}
+
+void AIOSPlugin::_on_pipeline_plan_proposed(const Dictionary &p_plan, const String &p_diff_preview) {
+	if (dock != nullptr) {
+		dock->append_diff_preview(p_diff_preview);
+		dock->append_log("info", "Plan waiting for approval — press Approve Plan to continue.");
 	}
 }
 

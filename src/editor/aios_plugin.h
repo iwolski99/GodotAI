@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "../agent/aios_agent_memory.h"
 #include "../agent/aios_credentials.h"
 #include "../agent/aios_llm_client.h"
 #include "../assets/aios_asset_pipeline.h"
@@ -30,6 +31,7 @@ private:
 	Ref<AIOSGitCheckpoint> git;
 	Ref<AIOSPlaytest> playtest;
 	Ref<AIOSCredentials> credentials;
+	Ref<AIOSAgentMemory> memory;
 	Ref<AIOSPipeline> pipeline;
 	AIOSLlmClient *llm = nullptr; // A child Node: HTTPRequest needs a tree.
 	AIOSAssetPipeline *assets = nullptr; // Ditto.
@@ -77,6 +79,7 @@ private:
 	void _on_pipeline_log(const String &p_level, const String &p_message);
 	void _on_pipeline_tool_invoked(const String &p_tool, const Dictionary &p_params);
 	void _on_pipeline_tool_completed(const String &p_tool, bool p_ok, const Dictionary &p_envelope);
+	void _on_pipeline_plan_proposed(const Dictionary &p_plan, const String &p_diff_preview);
 	void _on_pipeline_run_finished(const Dictionary &p_summary);
 
 	// Playtest -> here

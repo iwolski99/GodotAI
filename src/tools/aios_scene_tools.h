@@ -38,6 +38,7 @@ public:
 	static Dictionary disconnect_signal_safe(const Dictionary &p_params);
 	static Dictionary read_script(const Dictionary &p_params);
 	static Dictionary patch_script(const Dictionary &p_params);
+	static Dictionary import_asset(const Dictionary &p_params);
 
 	// Shared helpers, also used by the world model and the tool registry.
 	static Node *get_edited_root();

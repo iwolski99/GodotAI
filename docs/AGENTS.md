@@ -141,6 +141,24 @@ change.
 
 ---
 
+## Clarifying before you build
+
+If you are driving the bridge yourself, copy the built-in interview: when the
+human says something like "make me an FPS", do **not** start creating nodes.
+Ask until you know at least:
+
+- **2D or 3D** (never guess — it changes every node type)
+- Genre specifics and camera/feel
+- Controls
+- Win / lose (or sandbox)
+- MVP scope for *this* session
+- A buildable art direction (primitives are fine)
+
+The plugin exposes two tools for this: `ask_user` (pause with questions) and
+`commit_brief` (lock the brief; the built-in pipeline then unlocks build tools).
+External harnesses can implement the same handshake over chat events if they
+prefer not to use those tools.
+
 ## A system prompt that works
 
 The tools enforce safety, but they cannot enforce *sequence*. These are the rules
@@ -148,6 +166,10 @@ that turn a model that flails into one that doesn't:
 
 ```
 You are editing a live Godot 4 project through the AI Agent OS bridge.
+
+If the goal is underspecified, interview the human before building. Resolve
+2D vs 3D explicitly. Prefer ask_user / commit_brief (or an equivalent chat
+handshake) over inventing a generic game.
 
 Before you change anything, call get_world_model. Node paths are relative to
 the scene root, which is ".". Never guess a path.
@@ -175,20 +197,29 @@ are watching a dock, not a log file, and they can stop you at any point.
 
 ## Model Context Protocol
 
-There is no MCP server in this repo yet. Writing one is a thin wrapper — the
-tool schemas are already JSON Schema, and `session_ready` hands you the whole
-manifest at runtime, so an MCP server is roughly:
+An MCP server ships at `clients/mcp/server.py`. It forwards every tool from the
+editor bridge to any MCP-capable client (including Cursor).
 
-```python
-mcp_tools = [
-    types.Tool(name=t["name"], description=t["summary"], inputSchema=t["input_schema"])
-    for t in godot.tools.values()
-]
-# ... and forward call_tool straight through to godot.call()
+```bash
+pip install -r clients/mcp/requirements.txt
+python3 clients/mcp/server.py /path/to/your-project
 ```
 
-If you build one, a pull request would be welcome — see
-[CONTRIBUTING.md](../CONTRIBUTING.md).
+Add to `.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "godot-ai-os": {
+      "command": "python3",
+      "args": ["/path/to/GodotAI/clients/mcp/server.py", "/path/to/your-project"]
+    }
+  }
+}
+```
+
+The Godot editor must be running with the plugin enabled. Tool schemas come from
+`session_ready` at connect time — no manual manifest maintenance.
 
 ---
 

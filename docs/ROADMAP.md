@@ -137,6 +137,73 @@ whether its changes worked. Milestone 3 lets it **edit** what already exists,
 **UI**
 - [x] Settings moved out of the dock into a dialog
 
+**Clarify-before-build and orchestration** *(a second, parallel effort — see
+[Two Milestone 3 branches](#two-milestone-3-branches) below)*
+- [x] Architect/coder modes interview via `ask_user` and lock a design brief
+      with `commit_brief` (including 2D vs 3D) before mutating tools unlock;
+      dock shows `CLARIFYING` and offers **Skip & Build**
+- [x] Agent roles with distinct tool permissions — architect / debugger /
+      playtester enforce allowlists in both the pipeline and the registry;
+      coder keeps full access
+- [x] Plan review — `propose_plan` + `ai_agent_os/agent/require_plan_approval`;
+      the dock shows the plan and a git diff preview; **Approve Plan** unlocks
+      mutating tools
+- [x] `import_asset` — copies a local image/audio file into `res://` and
+      queues Godot's import (distinct from `generate_3d_asset`, which
+      generates from a text prompt via a paid API)
+- [x] Per-project agent memory — conventions and failure history in
+      `.godot/ai_agent_os/memory.json`, injected into the system prompt
+- [x] MCP server (`clients/mcp/server.py`) wrapping the Python bridge, for
+      Cursor and other MCP clients
+- [x] `auto_playtest` now actually wired — a smoke playtest runs
+      automatically after a successful mutating batch when the setting is on
+      (previously stored but never read — see the fixes below)
+- [x] Partial driver lock — IPC mutating calls are rejected while the
+      built-in pipeline is actively running
+- [x] CI: a GitHub Actions build matrix (Linux/macOS/Windows) plus a headless
+      integration smoke test that launches the real editor and calls
+      `ping` / `get_world_model` / `list_tools` over the bridge — the same
+      manual check this project's development relied on, now automated.
+      Uploads build artifacts per OS; does not yet publish GitHub Releases.
+
+Several bugs turned up while building this half of Milestone 3 and are fixed
+as part of it, not deferred:
+
+- **Repair budget didn't always abort.** After the playtest repair budget was
+  spent, a successful rollback reset the counter to zero and let the model
+  keep going instead of stopping the run. Scene-validation repair with
+  `auto_rollback` off had the same hole — budget exhaustion just kept
+  resending findings forever. Both paths now abort unconditionally once the
+  budget is spent; `auto_rollback` only decides whether the tree is reset
+  first.
+- **Stop / playtest race.** `AIOSPlaytest::stop()` emitted `playtest_finished`
+  synchronously; clearing `awaiting_playtest` *after* that call let the
+  handler start a new model turn immediately after Stop was pressed.
+  Ownership is dropped before the process is killed.
+- **Skip & Build's dimension guess.** A goal containing "fps" was always
+  routed to 3D, even when it also said "2D" or "top-down." The heuristic now
+  checks for those qualifiers first.
+
+---
+
+## Two Milestone 3 branches
+
+Two independent agents both picked up "the rest of Milestone 3" after the
+editing/spatial tools (`bcadc70`) and worked in parallel: this repo's own
+vision/asset/Blender pipeline (above), and a second effort — clarify-before-
+build, roles, plan review, MCP server, memory, and CI — merged in from
+`cursor/milestone-3-tasks-5b9e`. A third branch, `cursor/milestone-3-
+orchestration-bfb0`, implemented overlapping ground (its own MCP server, its
+own memory) from the same starting point and was **not** merged, to avoid
+carrying two competing implementations of the same features. Its
+`docs/REVIEW-AGENT-LOOPS.md` review — the bug list above came from it — was
+worth keeping; the code was not merged alongside it.
+
+The two merged efforts turned out to be complementary rather than
+overlapping: one added *what* an agent can do (edit, see, acquire assets),
+the other added *how carefully* it does it (clarify first, ask permission,
+remember what happened last time) plus the CI this project didn't have.
+
 ---
 
 ## How the three milestones interlock
@@ -191,28 +258,63 @@ them, and M2 can only gate them because M1 made the project legible.**
 
 ## Milestone 4 — the ideas that did not fit
 
-Not scheduled. Listed because they came up while building M3 and are the
-obvious next things.
+Not scheduled. What's left after the clarify-before-build merge above took a
+bite out of this list.
 
 **Making long sessions work**
-- Plan review: the agent proposes a sequence, the human approves it in the
-  dock, and only then does it execute
-- Diff preview before a batch of mutations lands
-- Per-project agent memory: what was tried, what broke, the conventions
-- Agent roles with distinct tool permissions (an Architect that cannot write
-  files; a Debugger that cannot delete)
+- ~~Plan review~~, ~~diff preview~~, ~~per-project agent memory~~, ~~agent
+  roles~~ — all shipped, see above
+- A **full** driver lock. What merged is partial: IPC mutating calls are
+  rejected while the built-in pipeline runs, but the reverse isn't true, and
+  there's still one shared `AIOSPlaytest` — two agents racing to observe at
+  once will step on each other. See
+  [Known limitation: two control planes](#known-limitation-two-control-planes)
+  below.
+- Server-side pipeline mode for IPC clients, so an external harness gets
+  Validate → Execute → Observe → Repair as structured events instead of
+  reimplementing Milestone 2 itself
+- A dock routing policy (`Built-in` / `External` / `Ask`) for when both a key
+  is configured and an external agent is connected
 
 **Assets**
-- Textures and audio through the same gateway (ElevenLabs and OpenAI keys are
-  already in the credential store; the download path is already generic)
+- Textures and audio *generated* through the gateway (`import_asset`, merged
+  above, copies a local file in — it doesn't call ElevenLabs or OpenAI to
+  create one; those keys are in the credential store with no tool yet)
 - A material pass — generated meshes arrive with flat albedo and no roughness
 - LOD generation, which is the same Blender decimate at three budgets
 - Animation retargeting
 
 **Reach**
-- MCP server so any MCP-capable client connects with no adapter code
-- Prebuilt binaries on GitHub Releases for Linux, macOS and Windows
-- CI: build matrix, headless integration tests against a real editor
+- ~~MCP server~~ — shipped, see above
+- **Published** GitHub Releases. CI (merged above) builds all three platforms
+  and uploads them as workflow artifacts, which is not the same as a
+  downloadable release — that's the remaining gap.
+
+---
+
+## Known limitation: two control planes
+
+Surfaced by the `cursor/milestone-3-orchestration-bfb0` review this merge
+pulled in (`docs/REVIEW-AGENT-LOOPS.md`), and still true after the merge: the
+built-in pipeline and an external IPC agent are **parallel control planes over
+shared tools**. They integrate cleanly when only one drives the project at a
+time. They were never designed to both be active at once:
+
+- IPC calls go straight to `AIOSToolRegistry::call_tool` — no Validate →
+  Observe → Repair wrapping, no step snapshot. An external harness gets the
+  same tools but not the same safety net unless it reimplements the loop
+  itself.
+- One `AIOSPlaytest` instance. A second `run_playtest` while one is in flight
+  gets `already_running` rather than queuing.
+- The driver lock that merged only blocks the IPC → built-in direction. A
+  human driving the dock while an external agent is also mutating over IPC is
+  still an unguarded race on the same git snapshots.
+
+None of this is new breakage — it's a real gap in the original Milestone 2
+design that a second agent's review caught. Worth deciding on deliberately
+(see the "major" proposals in `docs/REVIEW-AGENT-LOOPS.md`) rather than
+patching around, since it's a design question — who owns the project when
+both paths are active — not a bug.
 
 ---
 

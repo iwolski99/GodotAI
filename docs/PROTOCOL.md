@@ -154,7 +154,7 @@ none of them is a black box to the human watching it.
 | `chat` | `{text}` | Renders as an agent message. Fenced code blocks and `` `inline code` `` are formatted. |
 | `thinking` | `{text}` | Renders as dimmed italic reasoning. |
 | `log` | `{level, text}` | A log line. `level` is `info` / `warn` / `error` / `success`. |
-| `status` | `{state, detail}` | Sets the pipeline indicator. `state` is `IDLE`, `PLANNING`, `VALIDATING`, `EXECUTING`, `PLAYTESTING`, `REPAIRING` or `ERROR`. |
+| `status` | `{state, detail}` | Sets the pipeline indicator. `state` is `IDLE`, `CLARIFYING`, `PLANNING`, `VALIDATING`, `EXECUTING`, `PLAYTESTING`, `REPAIRING`, `AWAITING_APPROVAL` or `ERROR`. |
 | `runtime_log` | `{stream, text}` | Console output from a running playtest. Sent by the runtime log bridge, not usually by agents. |
 
 Text arriving from an agent is BBCode-escaped before display, so markup in a
@@ -164,9 +164,15 @@ model's output cannot inject formatting or images into the editor UI.
 
 ## Asynchronous tools
 
-Every tool but one returns its result in the `response` to your `request`.
+Most tools return their result in the `response` to your `request`.
 
-`run_playtest` is the exception, because the thing it is reporting on has not
+`ask_user` is interactive: the built-in pipeline pauses and waits for the human's
+dock reply before synthesising a `tool_result`. Over IPC the call returns
+`{queued: true, questions: [...]}` immediately — your harness presents the
+questions and continues. Pair it with `commit_brief` to lock a 2D/3D design
+brief before mutating the project.
+
+`run_playtest` is asynchronous because the thing it is reporting on has not
 happened yet. The response acknowledges the launch:
 
 ```json

@@ -1,10 +1,11 @@
 # The agent pipeline
 
-`Plan → Validate → Execute → Observe → Repair → Snapshot → Continue`
+`Clarify → Plan → Validate → Execute → Observe → Repair → Snapshot → Continue`
 
-This is the document for the Milestone 2 runtime loop: what each stage does, the
-pseudocode it follows, the C++ that intercepts a running game's output, and the
-exact text handed back to the model when something fails.
+This is the document for the Milestone 2 runtime loop (plus the clarification
+interview added on top): what each stage does, the pseudocode it follows, the
+C++ that intercepts a running game's output, and the exact text handed back to
+the model when something fails.
 
 ---
 
@@ -45,6 +46,12 @@ Two properties carry the whole design:
                         │  AIOSGitCheckpoint           │  last_good_snapshot
                         └───────────────┬──────────────┘
                                         │
+                        ┌───────────────▼──────────────┐
+                        │  CLARIFY  (architect/coder)  │  ask_user / commit_brief
+                        │  Build tools withheld until  │  dock answers / Skip & Build
+                        │  a 2D/3D brief is locked     │
+                        └───────────────┬──────────────┘
+                                        │ brief committed
            ┌────────────────────────────▼──────────────┐
     ┌─────▶│  PLAN                                     │
     │      │  AIOSLlmClient -> Anthropic / OpenRouter  │
@@ -103,10 +110,30 @@ Two properties carry the whole design:
               CONTINUE: results go back as tool_result blocks
 ```
 
+### Clarification before build
+
+Vague goals like "make me an FPS" must not become a generic game. In
+`architect` and `coder` modes the pipeline starts in **CLARIFYING**:
+
+1. Only interview tools are offered: `ask_user`, `commit_brief`, plus read-only
+   helpers (`get_world_model`, `list_tools`, `ping`, `read_script`, `open_scene`).
+2. The model asks focused questions (2D vs 3D, genre, controls, win/lose, MVP
+   scope, art direction) via `ask_user`. The dock pauses on
+   `user_questions_requested`; the next Send is the human's answer.
+3. When the brief is solid, the model calls `commit_brief` with
+   `dimensions: "2d" | "3d"`. Build tools unlock and the normal loop continues.
+4. **Skip & Build** (the Execute button during clarification) synthesises a
+   minimal brief from the original goal and builds immediately — so the human
+   is never trapped in the interview.
+
+Debugger and playtester modes skip clarification. Project Settings →
+**AI Agent OS → agent/require_brief** turns the interview off entirely.
+
 Every C++ class in Milestone 2 serves exactly one stage:
 
 | Stage | Class | File |
 | --- | --- | --- |
+| Clarify | `AIOSPipeline` (`ask_user`, `commit_brief`) | `src/pipeline/`, schemas |
 | Plan | `AIOSLlmClient`, `AIOSProvider` | `src/agent/` |
 | Validate | `AIOSValidator` | `src/validate/` |
 | Execute | `AIOSToolRegistry`, `AIOSSceneTools` | `src/tools/` |
@@ -130,6 +157,7 @@ start(goal, mode):
     if no model configured:      return error "no_model"
 
     reset counters, clear pending results
+    clarifying = require_brief and mode in (architect, coder)
 
     git_ok = git.is_available()
     if git_ok:
@@ -138,14 +166,22 @@ start(goal, mode):
         warn the human that rollback is unavailable
 
     llm.reset_conversation()
-    llm.system_prompt = build_system_prompt(mode, git_ok)
-    llm.tools         = registry.list_tools()      # same manifest IPC clients get
+    llm.system_prompt = build_system_prompt(mode, git_ok, clarifying)
+    llm.tools         = clarifying
+                            ? clarify-phase tools only
+                            : registry.list_tools()
 
-    stage = PLANNING
-    llm.send_user_message(goal)                    # async; returns immediately
+    if clarifying:
+        stage = CLARIFYING
+        llm.send_user_message(goal + clarification nudge)
+    else:
+        stage = PLANNING
+        llm.send_user_message(goal)                # async; returns immediately
 ```
 
 Nothing blocks. The editor keeps running; the response arrives on a signal.
+While `ask_user` is outstanding, the dock routes the next Send to
+`continue_with_user_answer` instead of starting a new run.
 
 ### A model turn
 
@@ -156,6 +192,9 @@ on_model_response(response):
     emit thinking, emit text                       # straight to the dock
 
     if response.tool_calls is empty:
+        if clarifying and not brief_ready:
+            stage = CLARIFYING                     # wait for dock answers
+            return
         stage = IDLE
         emit run_finished(ok)                      # the model considers it done
         return
@@ -226,9 +265,10 @@ finish_turn():
         repair_attempts += 1
         stage = REPAIRING
 
-        if repair_attempts >= max_repair_attempts and auto_rollback and step_snapshot:
-            git.reset_to_snapshot(step_snapshot)   # hard reset; safe, see below
-            abort("repair_budget_exhausted")       # hand control to the human
+        if repair_attempts >= max_repair_attempts:
+            if auto_rollback and step_snapshot:
+                git.reset_to_snapshot(step_snapshot)   # hard reset; safe, see below
+            abort("repair_budget_exhausted")           # always; auto_rollback only chooses cleanup
             return
 
         send sweep findings back as text + pending results
@@ -260,10 +300,10 @@ on_playtest_finished(report):
 
     if failed:
         repair_attempts += 1
-        if repair_attempts >= max_repair_attempts and auto_rollback:
-            git.reset_to_snapshot(step_snapshot)
-            push build_rollback_notice(...)
-            abort("repair_budget_exhausted")
+        if repair_attempts >= max_repair_attempts:
+            if auto_rollback:
+                git.reset_to_snapshot(step_snapshot)
+            abort("repair_budget_exhausted")       # always; never continue the loop
             return
 
     drain deferred_calls through execute_call()
@@ -603,6 +643,7 @@ Project Settings → **AI Agent OS**:
 | `agent/max_repair_attempts` | 3 | Consecutive failures before rollback and abort. |
 | `agent/auto_playtest` | on | Let the pipeline run a playtest as part of its loop. |
 | `agent/auto_rollback` | on | Reset to the step snapshot when the repair budget is spent. Turn off to inspect the wreckage. |
+| `agent/require_brief` | on | Interview before build in architect/coder modes. Off skips straight to planning. |
 | `vcs/auto_checkpoint` | on | Commit after each mutating tool call. |
 
 Turning `auto_rollback` off is a debugging aid: the run still aborts, but the

@@ -28,6 +28,9 @@ struct ToolInfo {
 // Order matters only for readability: this is what an agent sees from
 // list_tools, and it doubles as the plugin's public surface.
 static const ToolInfo TOOL_TABLE[] = {
+	{ "ask_user", "Pause and ask the human clarifying questions before building. Required when the goal is underspecified.", false },
+	{ "commit_brief", "Lock in a 2D/3D game design brief after clarification; unlocks build tools.", false },
+	{ "propose_plan", "Propose a step-by-step plan for human review before mutating the project.", false },
 	{ "get_world_model", "Snapshot of the project: scene tree, node types, scripts, groups and the res:// inventory.", false },
 	{ "create_node_safe", "Instantiate a node under a parent with type-checked properties.", true },
 	{ "attach_script_safe", "Write a GDScript file and attach it to a node, verifying the base class first.", true },
@@ -39,6 +42,7 @@ static const ToolInfo TOOL_TABLE[] = {
 	{ "create_scene", "Create a new .tscn file with a root node of the given type — the way to build a reusable prefab.", true },
 	{ "read_script", "Read a GDScript file with its function index, optionally windowed to a line range.", false },
 	{ "patch_script", "Edit part of a script (one function, an append, or a text replacement) without rewriting the whole file.", true },
+	{ "import_asset", "Copy an image or audio file into res:// and trigger Godot's import pipeline.", true },
 	{ "save_scene", "Persist the open scene to disk (required before checkpoints can capture scene edits).", true },
 	{ "open_scene", "Switch the editor to another scene so the other tools act on it.", false },
 	{ "validate_change", "Dry-run a planned tool call through the static checker without executing it.", false },
@@ -98,6 +102,44 @@ bool AIOSToolRegistry::is_mutating(const String &p_tool) {
 		}
 	}
 	return false;
+}
+
+bool AIOSToolRegistry::is_clarify_phase_tool(const String &p_tool) {
+	return p_tool == "ask_user" || p_tool == "commit_brief" || p_tool == "propose_plan" ||
+			p_tool == "get_world_model" || p_tool == "list_tools" || p_tool == "ping" ||
+			p_tool == "read_script" || p_tool == "open_scene";
+}
+
+bool AIOSToolRegistry::is_allowed_for_role(const String &p_tool, const String &p_role) {
+	const String role = p_role.to_lower();
+	if (role.is_empty() || role == "coder") {
+		return true;
+	}
+
+	if (role == "architect") {
+		// Planning and inspection only — no file or scene mutations.
+		return p_tool == "ask_user" || p_tool == "commit_brief" || p_tool == "propose_plan" ||
+				p_tool == "get_world_model" || p_tool == "read_script" || p_tool == "open_scene" ||
+				p_tool == "validate_change" || p_tool == "validate_scene" || p_tool == "run_playtest" ||
+				p_tool == "list_tools" || p_tool == "ping";
+	}
+
+	if (role == "debugger") {
+		// Fix bugs without destructive or structural changes.
+		if (p_tool == "safe_delete_node" || p_tool == "create_node_safe" || p_tool == "create_scene" ||
+				p_tool == "rollback_last" || p_tool == "create_checkpoint" || p_tool == "import_asset") {
+			return false;
+		}
+		return true;
+	}
+
+	if (role == "playtester") {
+		return p_tool == "get_world_model" || p_tool == "read_script" || p_tool == "open_scene" ||
+				p_tool == "validate_scene" || p_tool == "run_playtest" || p_tool == "propose_plan" ||
+				p_tool == "list_tools" || p_tool == "ping";
+	}
+
+	return true;
 }
 
 Dictionary AIOSToolRegistry::_load_schema(const String &p_tool) {
@@ -168,6 +210,17 @@ Dictionary AIOSToolRegistry::call_tool(const String &p_tool, const Dictionary &p
 		return envelope;
 	}
 
+	if (!active_role.is_empty() && !is_allowed_for_role(p_tool, active_role)) {
+		Dictionary details;
+		details["role"] = active_role;
+		details["tool"] = p_tool;
+		envelope = AIOSJson::error("role_forbidden",
+				"The '" + active_role + "' role cannot call '" + p_tool + "'. Switch mode or use a different tool.",
+				details);
+		emit_signal("tool_executed", p_tool, false, envelope);
+		return envelope;
+	}
+
 	const bool dry_run = AIOSJson::get_bool(p_params, "dry_run", false);
 
 	// --- cost guard --------------------------------------------------------
@@ -194,7 +247,73 @@ Dictionary AIOSToolRegistry::call_tool(const String &p_tool, const Dictionary &p
 		emit_signal("billable_call", p_tool, billable_calls, billable_budget);
 	}
 
-	if (p_tool == "get_world_model") {
+	if (p_tool == "ask_user") {
+		// The in-editor pipeline intercepts this and pauses for a dock answer.
+		// External harnesses present the questions themselves and treat the
+		// returned payload as the interview turn.
+		Array questions = AIOSJson::get_array(p_params, "questions");
+		if (questions.is_empty()) {
+			envelope = AIOSJson::error("missing_parameter",
+					"'questions' must contain at least one question object with id and prompt.");
+		} else {
+			Dictionary result;
+			result["queued"] = true;
+			result["intro"] = AIOSJson::get_string(p_params, "intro", "");
+			result["questions"] = questions;
+			result["message"] =
+					"Present these questions to the human and continue with their answers. "
+					"Do not build until commit_brief has succeeded.";
+			envelope = AIOSJson::ok(result);
+		}
+	} else if (p_tool == "commit_brief") {
+		const String dimensions = AIOSJson::get_string(p_params, "dimensions", "").to_lower();
+		const String title = AIOSJson::get_string(p_params, "title", "");
+		const String summary = AIOSJson::get_string(p_params, "summary", "");
+		const String core_loop = AIOSJson::get_string(p_params, "core_loop", "");
+		const String scope = AIOSJson::get_string(p_params, "scope", "");
+		if (title.is_empty() || summary.is_empty() || core_loop.is_empty() || scope.is_empty()) {
+			envelope = AIOSJson::error("missing_parameter",
+					"commit_brief requires title, summary, core_loop and scope.");
+		} else if (dimensions != "2d" && dimensions != "3d") {
+			envelope = AIOSJson::error("invalid_dimensions",
+					"'dimensions' must be \"2d\" or \"3d\". Ask the human with ask_user if you do not know.");
+		} else {
+			Dictionary brief;
+			brief["title"] = title;
+			brief["dimensions"] = dimensions;
+			brief["genre"] = AIOSJson::get_string(p_params, "genre", "");
+			brief["summary"] = summary;
+			brief["core_loop"] = core_loop;
+			brief["controls"] = AIOSJson::get_string(p_params, "controls", "");
+			brief["win_lose"] = AIOSJson::get_string(p_params, "win_lose", "");
+			brief["scope"] = scope;
+			brief["art_direction"] = AIOSJson::get_string(p_params, "art_direction", "");
+			brief["technical_notes"] = AIOSJson::get_string(p_params, "technical_notes", "");
+			Dictionary result;
+			result["committed"] = true;
+			result["brief"] = brief;
+			result["message"] =
+					"Brief locked. Build tools are now available. Implement this brief; prefer the declared "
+					"2D or 3D node types (Node2D/CharacterBody2D vs Node3D/CharacterBody3D) and call "
+					"get_world_model before the first edit.";
+			envelope = AIOSJson::ok(result);
+		}
+	} else if (p_tool == "propose_plan") {
+		const String summary = AIOSJson::get_string(p_params, "summary", "");
+		Array steps = AIOSJson::get_array(p_params, "steps");
+		if (summary.is_empty() || steps.is_empty()) {
+			envelope = AIOSJson::error("missing_parameter",
+					"propose_plan requires a non-empty 'summary' and at least one entry in 'steps'.");
+		} else {
+			Dictionary result;
+			result["queued"] = true;
+			result["summary"] = summary;
+			result["steps"] = steps;
+			result["message"] =
+					"Plan submitted for human review. Wait for approval before calling mutating tools.";
+			envelope = AIOSJson::ok(result);
+		}
+	} else if (p_tool == "get_world_model") {
 		envelope = world_model.is_valid() ? world_model->get_world_model(p_params)
 										  : AIOSJson::error("not_initialised", "World model is unavailable.");
 	} else if (p_tool == "create_node_safe") {
@@ -217,6 +336,8 @@ Dictionary AIOSToolRegistry::call_tool(const String &p_tool, const Dictionary &p
 		envelope = AIOSSceneTools::read_script(p_params);
 	} else if (p_tool == "patch_script") {
 		envelope = AIOSSceneTools::patch_script(p_params);
+	} else if (p_tool == "import_asset") {
+		envelope = AIOSSceneTools::import_asset(p_params);
 	} else if (p_tool == "save_scene") {
 		envelope = AIOSSceneTools::save_scene(p_params);
 	} else if (p_tool == "open_scene") {

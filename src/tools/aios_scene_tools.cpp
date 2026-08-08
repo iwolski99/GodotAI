@@ -14,6 +14,7 @@
 #include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/global_constants.hpp>
 #include <godot_cpp/classes/packed_scene.hpp>
+#include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/classes/resource_loader.hpp>
 #include <godot_cpp/classes/resource_saver.hpp>
 #include <godot_cpp/classes/script.hpp>
@@ -1778,5 +1779,94 @@ Dictionary AIOSSceneTools::open_scene(const Dictionary &p_params) {
 	if (!(bool)result["opened"]) {
 		result["note"] = "The editor did not switch to this scene; check the Output panel for a load error.";
 	}
+	return AIOSJson::ok(result);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  import_asset                                                               */
+/* -------------------------------------------------------------------------- */
+
+static bool is_supported_asset_extension(const String &p_ext) {
+	const String ext = p_ext.to_lower();
+	return ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "webp" || ext == "svg" ||
+			ext == "wav" || ext == "ogg" || ext == "mp3";
+}
+
+Dictionary AIOSSceneTools::import_asset(const Dictionary &p_params) {
+	const bool dry_run = AIOSJson::get_bool(p_params, "dry_run", false);
+	const String source = AIOSJson::get_string(p_params, "source_path", "");
+	String dest = AIOSJson::get_string(p_params, "dest_path", "");
+
+	if (source.is_empty()) {
+		return AIOSJson::error("missing_parameter", "'source_path' is required (absolute path to the file on disk).");
+	}
+	if (!FileAccess::file_exists(source)) {
+		return AIOSJson::error("file_not_found", "No file at '" + source + "'.");
+	}
+
+	const String source_ext = source.get_extension().to_lower();
+	if (!is_supported_asset_extension(source_ext)) {
+		return AIOSJson::error("unsupported_format",
+				"Unsupported extension '." + source_ext +
+						"'. Supported: png, jpg, jpeg, webp, svg, wav, ogg, mp3.");
+	}
+
+	if (dest.is_empty()) {
+		dest = "res://assets/" + source.get_file();
+	}
+	if (!dest.begins_with("res://")) {
+		return AIOSJson::error("invalid_path", "'dest_path' must start with res://.");
+	}
+
+	const String dest_ext = dest.get_extension().to_lower();
+	if (!dest_ext.is_empty() && dest_ext != source_ext) {
+		return AIOSJson::error("extension_mismatch",
+				"Destination extension '." + dest_ext + "' does not match source '." + source_ext + "'.");
+	}
+
+	const String global_dest = ProjectSettings::get_singleton()->globalize_path(dest);
+	const String dest_dir = global_dest.get_base_dir();
+	if (!DirAccess::dir_exists_absolute(dest_dir)) {
+		if (dry_run) {
+			Dictionary result;
+			result["dry_run"] = true;
+			result["would_create_dir"] = dest_dir;
+			result["would_copy"] = source + " -> " + dest;
+			return AIOSJson::ok(result);
+		}
+		const Error mk = DirAccess::make_dir_recursive_absolute(dest_dir);
+		if (mk != OK) {
+			return AIOSJson::error("mkdir_failed", "Could not create directory '" + dest_dir + "'.");
+		}
+	}
+
+	if (dry_run) {
+		Dictionary result;
+		result["dry_run"] = true;
+		result["would_copy"] = source + " -> " + dest;
+		result["note"] = "Godot will import the file on the next filesystem scan.";
+		return AIOSJson::ok(result);
+	}
+
+	if (FileAccess::file_exists(global_dest)) {
+		return AIOSJson::error("already_exists",
+				"'" + dest + "' already exists. Choose a different dest_path or delete the existing file.");
+	}
+
+	const Error copied = DirAccess::copy_absolute(source, global_dest);
+	if (copied != OK) {
+		return AIOSJson::error("copy_failed", "Could not copy '" + source + "' to '" + dest + "'.");
+	}
+
+	EditorFileSystem *efs = EditorFileSystem::get_singleton();
+	if (efs != nullptr) {
+		efs->update_file(dest);
+	}
+
+	Dictionary result;
+	result["dest_path"] = dest;
+	result["source_path"] = source;
+	result["imported"] = true;
+	result["note"] = "File copied and queued for import. Use the returned res:// path in node properties.";
 	return AIOSJson::ok(result);
 }

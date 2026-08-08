@@ -5,21 +5,24 @@ GDExtension that lets an AI agent inspect, build, edit and *playtest* a Godot 4
 project through a typed, validated tool API — with a chat dock in the editor so
 you can watch it work and stop it when it goes wrong.
 
-Type a goal. The plugin plans it, checks each change before making it, runs the
-game, reads the errors, fixes them, and rolls back to a git snapshot if it can't.
+Type a goal. For vague requests the agent interviews you first (2D vs 3D, genre,
+controls, scope) until the brief is solid — then it plans, checks each change
+before making it, runs the game, reads the errors, fixes them, and rolls back to
+a git snapshot if it can't.
 
 No copy-pasting code out of a chat window. No agent guessing at your scene tree.
 No wondering what it just did to your project.
 
 ```
-   Plan ──▶ Validate ──▶ Execute ──▶ Observe ──▶ Repair ──▶ Snapshot ──▶ Continue
-    │           │            │           │          │           │
-    │           │            │           │          │           └─ git commit
-    │           │            │           │          └─ feed the error back
-    │           │            │           └─ run the game, parse the stack trace
-    │           │            └─ change the project
-    │           └─ compile the script in memory; refuse it if it's broken
-    └─ your model, or ours
+   Clarify ──▶ Plan ──▶ Validate ──▶ Execute ──▶ Observe ──▶ Repair ──▶ Snapshot
+      │          │           │            │           │          │           │
+      │          │           │            │           │          │           └─ git commit
+      │          │           │            │           │          └─ feed the error back
+      │          │           │            │           └─ run the game, parse the stack trace
+      │          │           │            └─ change the project
+      │          │           └─ compile the script in memory; refuse it if it's broken
+      │          └─ your model, or ours
+      └─ ask until 2D/3D + brief are locked (or Skip & Build)
 ```
 
 > **Status: all three milestones shipped.** Tools, the autonomous pipeline with
