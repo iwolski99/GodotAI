@@ -15,6 +15,7 @@
 #include <godot_cpp/classes/option_button.hpp>
 #include <godot_cpp/classes/panel_container.hpp>
 #include <godot_cpp/classes/rich_text_label.hpp>
+#include <godot_cpp/classes/scroll_container.hpp>
 #include <godot_cpp/classes/spin_box.hpp>
 #include <godot_cpp/classes/text_edit.hpp>
 #include <godot_cpp/classes/v_box_container.hpp>

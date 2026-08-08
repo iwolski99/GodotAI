@@ -4,6 +4,7 @@
 
 #include "aios_plugin.h"
 
+#include "../aios_build_info.h"
 #include "../util/aios_json.h"
 
 #include <godot_cpp/classes/dir_access.hpp>
@@ -390,6 +391,8 @@ void AIOSPlugin::_enter_tree() {
 	_apply_model_settings();
 	_restore_chat_session();
 
+	dock->append_log("info", "AI Agent OS extension build " AIOS_GIT_COMMIT " loaded.");
+
 	if (llm->is_configured()) {
 		dock->append_log("info",
 				"Built-in agent ready: " + llm->describe_target() +
@@ -673,6 +676,30 @@ void AIOSPlugin::_on_execute_plan_requested(const String &p_mode) {
 		return;
 	}
 
+	if (llm != nullptr && llm->is_configured()) {
+		if (pipeline.is_valid() && pipeline->is_running()) {
+			dock->append_log("warn", "A run is already in progress — stop it before executing the plan.");
+			return;
+		}
+
+		const String prompt =
+				"Implement the current plan and committed brief now. You are in " + p_mode +
+				" mode with full build tools. Continue from the existing conversation — do not restart the "
+				"clarification interview or re-propose the plan from scratch unless something is missing.";
+
+		Dictionary started;
+		if (pipeline.is_valid() && pipeline->has_session_context()) {
+			started = pipeline->continue_session(prompt, p_mode);
+		} else {
+			started = pipeline->start(prompt, p_mode);
+		}
+		if (!(bool)started["ok"]) {
+			Dictionary error = started["error"];
+			dock->append_log("error", String(error["message"]));
+		}
+		return;
+	}
+
 	Dictionary data;
 	data["mode"] = p_mode;
 	ipc->broadcast_event("execute_plan", data);
@@ -718,7 +745,17 @@ void AIOSPlugin::_save_chat_session() {
 	}
 
 	Dictionary data = chat_session.capture(dock, llm, pipeline.ptr());
-	if (String(data.get("dock_text", "")).is_empty() && (!data.has("llm_history") || Array(data["llm_history"]).is_empty())) {
+	bool has_content = !String(data.get("dock_text", "")).is_empty();
+	if (!has_content && data.has("llm_history")) {
+		has_content = Array(data["llm_history"]).size() > 0;
+	}
+	if (!has_content && data.has("pipeline")) {
+		Dictionary pipeline_state = data["pipeline"];
+		has_content = !String(pipeline_state.get("goal", "")).is_empty() ||
+				!Dictionary(pipeline_state.get("committed_brief", Dictionary())).is_empty() ||
+				!Dictionary(pipeline_state.get("pending_plan", Dictionary())).is_empty();
+	}
+	if (!has_content) {
 		chat_session.clear();
 		session_dirty = false;
 		return;

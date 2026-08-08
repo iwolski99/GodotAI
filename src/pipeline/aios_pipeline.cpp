@@ -530,6 +530,14 @@ void AIOSPipeline::sync_session_tools() {
 	}
 }
 
+void AIOSPipeline::refresh_session_prompt() {
+	if (llm == nullptr || !llm->is_configured() || !llm->get_system_prompt().is_empty()) {
+		return;
+	}
+	const bool git_ok = git.is_valid() && git->is_available();
+	llm->set_system_prompt(build_system_prompt(mode, git_ok, clarifying, _memory_block()));
+}
+
 /* -------------------------------------------------------------------------- */
 /*  System prompt                                                              */
 /* -------------------------------------------------------------------------- */
@@ -648,6 +656,9 @@ Dictionary AIOSPipeline::start(const String &p_goal, const String &p_mode) {
 	if (llm == nullptr || !llm->is_configured()) {
 		return AIOSJson::error("no_model",
 				"No model is configured. Open the AI Agent dock's Settings panel and add an API key.");
+	}
+	if (has_session_context()) {
+		return continue_session(p_goal, p_mode);
 	}
 
 	_prepare_run_state(p_goal, p_mode, true);

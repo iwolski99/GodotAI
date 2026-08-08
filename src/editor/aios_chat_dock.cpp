@@ -4,6 +4,7 @@
 
 #include "aios_chat_dock.h"
 
+#include "../aios_build_info.h"
 #include "../util/aios_json.h"
 
 #include <godot_cpp/classes/accept_dialog.hpp>
@@ -239,7 +240,7 @@ void AIOSChatDock::_build_settings_panel(VBoxContainer *p_root) {
 	settings_dialog->set_ok_button_text("Done");
 	// Closing with Done is all there is: every control applies its change the
 	// moment it is edited, so there is no separate save step to get wrong.
-	settings_dialog->set_min_size(Vector2i(460, 0));
+	settings_dialog->set_min_size(Vector2i(480, 520));
 	add_child(settings_dialog);
 
 	MarginContainer *margin = memnew(MarginContainer);
@@ -249,9 +250,15 @@ void AIOSChatDock::_build_settings_panel(VBoxContainer *p_root) {
 	margin->add_theme_constant_override("margin_bottom", 4);
 	settings_dialog->add_child(margin);
 
+	ScrollContainer *settings_scroll = memnew(ScrollContainer);
+	settings_scroll->set_custom_minimum_size(Vector2i(460, 460));
+	settings_scroll->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+	settings_scroll->set_v_size_flags(Control::SIZE_EXPAND_FILL);
+	margin->add_child(settings_scroll);
+
 	settings_panel = memnew(VBoxContainer);
 	settings_panel->add_theme_constant_override("separation", 2);
-	margin->add_child(settings_panel);
+	settings_scroll->add_child(settings_panel);
 
 	// --- provider ----------------------------------------------------------
 	settings_panel->add_child(make_caption("Provider"));
@@ -388,6 +395,12 @@ void AIOSChatDock::_build_settings_panel(VBoxContainer *p_root) {
 			"Hard cap on model tool rounds per prompt. Building a game from scratch often needs more than the old default of 24.");
 	max_turns_field->connect("value_changed", Callable(this, "_on_setting_changed"));
 	settings_panel->add_child(max_turns_field);
+
+	Label *build_label = memnew(Label);
+	build_label->set_text("Extension build: " + String(AIOS_GIT_COMMIT));
+	build_label->add_theme_color_override("font_color", COLOR_MUTED);
+	build_label->add_theme_font_size_override("font_size", 11);
+	settings_panel->add_child(build_label);
 }
 
 String AIOSChatDock::_current_provider() const {

@@ -167,6 +167,7 @@ public:
 	Dictionary export_session_state() const;
 	void import_session_state(const Dictionary &p_state);
 	void sync_session_tools();
+	void refresh_session_prompt();
 
 	// True when a prior prompt or handoff artifact should be preserved.
 	bool has_session_context() const;

@@ -102,6 +102,7 @@ bool AIOSChatSession::apply(const Dictionary &p_data, AIOSChatDock *p_dock, AIOS
 
 	if (p_pipeline != nullptr) {
 		p_pipeline->sync_session_tools();
+		p_pipeline->refresh_session_prompt();
 	}
 
 	return true;

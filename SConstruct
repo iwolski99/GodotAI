@@ -14,8 +14,18 @@ demo project in `project/` picks it up without a copy step.
 """
 
 import os
+import subprocess
 
 env = SConscript("godot-cpp/SConstruct")
+
+try:
+	git_commit = subprocess.check_output(
+		["git", "rev-parse", "--short", "HEAD"], stderr=subprocess.DEVNULL, text=True
+	).strip()
+except Exception:
+	git_commit = "unknown"
+
+env.Append(CCFLAGS=['-DAIOS_GIT_COMMIT=\\"%s\\"' % git_commit])
 
 # The plugin is editor-only: every class it registers talks to EditorInterface.
 # We still build the "template" targets so users can ship a release-optimised
