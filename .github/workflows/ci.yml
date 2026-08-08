@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, "claude/**", "cursor/**"]
+  pull_request:
+
+jobs:
+  build:
+    name: Build GDExtension (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+          - os: macos-latest
+            platform: macos
+          - os: windows-latest
+            platform: windows
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install SCons
+        run: pip install scons
+
+      - name: Build editor plugin
+        run: scons platform=${{ matrix.platform }} target=editor -j4
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: godot-ai-os-${{ matrix.platform }}
+          path: project/addons/godot_ai_os/bin/
+          if-no-files-found: error
+
+  integration:
+    name: Integration smoke test
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Download Linux binary
+        uses: actions/download-artifact@v4
+        with:
+          name: godot-ai-os-linux
+          path: project/addons/godot_ai_os/bin/
+
+      - name: Install Godot 4.4
+        run: |
+          wget -q https://github.com/godotengine/godot/releases/download/4.4-stable/Godot_v4.4-stable_linux.x86_64.zip
+          unzip -q Godot_v4.4-stable_linux.x86_64.zip
+          chmod +x Godot_v4.4-stable_linux.x86_64
+          sudo mv Godot_v4.4-stable_linux.x86_64 /usr/local/bin/godot
+
+      - name: Initialize git in demo project
+        working-directory: project
+        run: |
+          git init
+          git config user.email "ci@example.com"
+          git config user.name "CI"
+          git add -A
+          git commit -m "ci baseline"
+
+      - name: Run smoke test
+        run: bash scripts/integration_smoke_test.sh

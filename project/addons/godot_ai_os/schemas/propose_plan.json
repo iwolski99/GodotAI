@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "propose_plan",
+  "title": "propose_plan",
+  "description": "Submit a step-by-step plan for human review before mutating the project. When plan approval is enabled, mutating tools are blocked until the human presses Approve Plan in the dock.",
+  "mutating": false,
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "One-paragraph overview of what you intend to build or change."
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string" },
+      "description": "Ordered list of concrete steps the human can review."
+    }
+  },
+  "required": ["summary", "steps"],
+  "errors": {
+    "missing_parameter": "summary and steps are both required.",
+    "plan_approval_required": "Mutating tools are blocked until propose_plan is approved."
+  }
+}

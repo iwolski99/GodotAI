@@ -27,8 +27,11 @@ void AIOSPipeline::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_auto_playtest", "enabled"), &AIOSPipeline::set_auto_playtest);
 	ClassDB::bind_method(D_METHOD("set_auto_rollback", "enabled"), &AIOSPipeline::set_auto_rollback);
 	ClassDB::bind_method(D_METHOD("set_require_brief", "enabled"), &AIOSPipeline::set_require_brief);
+	ClassDB::bind_method(D_METHOD("set_require_plan_approval", "enabled"), &AIOSPipeline::set_require_plan_approval);
 	ClassDB::bind_method(D_METHOD("is_clarifying"), &AIOSPipeline::is_clarifying);
 	ClassDB::bind_method(D_METHOD("is_awaiting_user"), &AIOSPipeline::is_awaiting_user);
+	ClassDB::bind_method(D_METHOD("is_awaiting_plan_approval"), &AIOSPipeline::is_awaiting_plan_approval);
+	ClassDB::bind_method(D_METHOD("approve_plan"), &AIOSPipeline::approve_plan);
 
 	ADD_SIGNAL(MethodInfo("stage_changed", PropertyInfo(Variant::STRING, "stage"), PropertyInfo(Variant::STRING, "detail")));
 	ADD_SIGNAL(MethodInfo("agent_message", PropertyInfo(Variant::STRING, "text")));
@@ -38,6 +41,7 @@ void AIOSPipeline::_bind_methods() {
 	ADD_SIGNAL(MethodInfo("tool_completed", PropertyInfo(Variant::STRING, "tool"), PropertyInfo(Variant::BOOL, "ok"), PropertyInfo(Variant::DICTIONARY, "envelope")));
 	ADD_SIGNAL(MethodInfo("user_questions_requested", PropertyInfo(Variant::DICTIONARY, "payload")));
 	ADD_SIGNAL(MethodInfo("brief_committed", PropertyInfo(Variant::DICTIONARY, "brief")));
+	ADD_SIGNAL(MethodInfo("plan_proposed", PropertyInfo(Variant::DICTIONARY, "plan"), PropertyInfo(Variant::STRING, "diff_preview")));
 	ADD_SIGNAL(MethodInfo("run_finished", PropertyInfo(Variant::DICTIONARY, "summary")));
 }
 
@@ -73,6 +77,8 @@ String AIOSPipeline::get_stage_name() const {
 			return "PLAYTESTING";
 		case STAGE_REPAIRING:
 			return "REPAIRING";
+		case STAGE_AWAITING_APPROVAL:
+			return "AWAITING_APPROVAL";
 		case STAGE_ERROR:
 			return "ERROR";
 		default:
@@ -98,8 +104,11 @@ Dictionary AIOSPipeline::get_status() const {
 	d["auto_playtest"] = auto_playtest;
 	d["auto_rollback"] = auto_rollback;
 	d["require_brief"] = require_brief;
+	d["require_plan_approval"] = require_plan_approval;
 	d["clarifying"] = is_clarifying();
 	d["awaiting_user"] = awaiting_user;
+	d["awaiting_plan_approval"] = awaiting_plan_approval;
+	d["plan_approved"] = plan_approved;
 	d["brief_ready"] = brief_ready;
 	d["brief"] = committed_brief;
 	return d;
@@ -238,6 +247,9 @@ void AIOSPipeline::_apply_tools_for_phase() {
 		if (is_clarifying() && !AIOSToolRegistry::is_clarify_phase_tool(name)) {
 			continue;
 		}
+		if (!AIOSToolRegistry::is_allowed_for_role(name, mode)) {
+			continue;
+		}
 		Dictionary tool;
 		tool["name"] = name;
 		tool["description"] = entry["summary"];
@@ -307,6 +319,10 @@ Dictionary AIOSPipeline::_minimal_brief_from_goal(const String &p_goal) {
 	return brief;
 }
 
+String AIOSPipeline::_memory_block() const {
+	return memory.is_valid() ? memory->format_for_prompt() : String();
+}
+
 void AIOSPipeline::_enter_build_phase(const Dictionary &p_brief, bool p_skipped_interview) {
 	committed_brief = p_brief;
 	brief_ready = true;
@@ -317,7 +333,7 @@ void AIOSPipeline::_enter_build_phase(const Dictionary &p_brief, bool p_skipped_
 
 	const bool git_ok = git.is_valid() && git->is_available();
 	if (llm != nullptr) {
-		llm->set_system_prompt(build_system_prompt(mode, git_ok, false));
+		llm->set_system_prompt(build_system_prompt(mode, git_ok, false, _memory_block()));
 	}
 	_apply_tools_for_phase();
 
@@ -333,7 +349,8 @@ void AIOSPipeline::_enter_build_phase(const Dictionary &p_brief, bool p_skipped_
 /*  System prompt                                                              */
 /* -------------------------------------------------------------------------- */
 
-String AIOSPipeline::build_system_prompt(const String &p_mode, bool p_git_available, bool p_clarifying) {
+String AIOSPipeline::build_system_prompt(const String &p_mode, bool p_git_available, bool p_clarifying,
+		const String &p_memory_block) {
 	String prompt =
 			"You are an autonomous game developer working inside the Godot 4 editor through the AI Agent OS "
 			"plugin. You have tools that read and modify a live Godot project. The human can see everything you "
@@ -397,16 +414,19 @@ String AIOSPipeline::build_system_prompt(const String &p_mode, bool p_git_availa
 			"Tell the human what you are doing as you go, in plain sentences. They are watching a dock, not "
 			"reading a log file.\n\n";
 
+	if (!p_memory_block.is_empty()) {
+		prompt += p_memory_block + "\n";
+	}
+
 	// Mode is the one thing that changes what the agent is *for*. Keeping the
 	// difference small and concrete beats four divergent prompts that drift.
 	const String m = p_mode.to_lower();
 	prompt += "## Your role right now: " + m + "\n\n";
 	if (m == "architect") {
 		prompt +=
-				"Plan before you build. Inspect the project, propose a concrete structure, and explain the "
-				"trade-offs in a sentence or two before creating anything. Prefer a small number of "
-				"well-named nodes over a deep tree. Do not write gameplay code unless the plan needs it to "
-				"be meaningful.";
+				"Plan before you build. Inspect the project, propose a concrete structure with propose_plan, "
+				"and explain the trade-offs in a sentence or two before creating anything. You cannot call "
+				"mutating tools in architect mode — hand off implementation to coder mode or wait for approval.";
 	} else if (m == "coder") {
 		prompt +=
 				"Implement what was asked, completely. Write GDScript that reads like the rest of the "
@@ -458,6 +478,18 @@ Dictionary AIOSPipeline::start(const String &p_goal, const String &p_mode) {
 	committed_brief.clear();
 	brief_ready = false;
 	clarifying = _mode_requires_brief(mode);
+	awaiting_plan_approval = false;
+	plan_approved = false;
+	pending_plan.clear();
+	propose_plan_tool_use_id = String();
+	batch_had_mutations = false;
+
+	if (registry.is_valid()) {
+		registry->set_active_role(mode);
+	}
+	if (memory.is_valid()) {
+		memory->load();
+	}
 
 	const bool git_ok = git.is_valid() && git->is_available();
 	if (!git_ok) {
@@ -477,7 +509,7 @@ Dictionary AIOSPipeline::start(const String &p_goal, const String &p_mode) {
 	}
 
 	llm->reset_conversation();
-	llm->set_system_prompt(build_system_prompt(mode, git_ok, clarifying));
+	llm->set_system_prompt(build_system_prompt(mode, git_ok, clarifying, _memory_block()));
 	_apply_tools_for_phase();
 
 	if (clarifying) {
@@ -581,7 +613,7 @@ Dictionary AIOSPipeline::skip_clarification_and_build() {
 
 	const bool git_ok = git.is_valid() && git->is_available();
 	llm->reset_conversation();
-	llm->set_system_prompt(build_system_prompt(mode, git_ok, false));
+	llm->set_system_prompt(build_system_prompt(mode, git_ok, false, _memory_block()));
 	_apply_tools_for_phase();
 
 	_set_stage(STAGE_PLANNING, "building from the skipped-interview brief");
@@ -595,6 +627,50 @@ Dictionary AIOSPipeline::skip_clarification_and_build() {
 	Dictionary result;
 	result["skipped"] = true;
 	result["brief"] = brief;
+	return AIOSJson::ok(result);
+}
+
+Dictionary AIOSPipeline::approve_plan() {
+	if (!awaiting_plan_approval) {
+		return AIOSJson::error("no_plan_pending",
+				"The agent has not proposed a plan that is waiting for approval.");
+	}
+	if (llm == nullptr) {
+		return AIOSJson::error("no_model", "The language-model client is unavailable.");
+	}
+	if (llm->is_busy()) {
+		return AIOSJson::error("busy", "A model request is already in flight.");
+	}
+
+	awaiting_plan_approval = false;
+	plan_approved = true;
+
+	if (!propose_plan_tool_use_id.is_empty()) {
+		Dictionary payload;
+		payload["approved"] = true;
+		payload["plan"] = pending_plan;
+
+		Dictionary block;
+		block["type"] = "tool_result";
+		block["tool_use_id"] = propose_plan_tool_use_id;
+		block["content"] = JSON::stringify(payload);
+
+		Array results;
+		results.push_back(block);
+		propose_plan_tool_use_id = String();
+		llm->send_tool_results(results);
+	} else {
+		llm->send_user_message(
+				"The human approved your plan. Proceed with implementation using mutating tools. "
+				"Call get_world_model first if you have not inspected the scene recently.");
+	}
+
+	_set_stage(STAGE_PLANNING, "plan approved — implementing");
+	emit_signal("pipeline_log", "success", "Plan approved. The agent may now mutate the project.");
+
+	Dictionary result;
+	result["approved"] = true;
+	result["plan"] = pending_plan;
 	return AIOSJson::ok(result);
 }
 
@@ -613,6 +689,13 @@ void AIOSPipeline::stop() {
 	deferred_calls.clear();
 	clarifying = false;
 	brief_ready = false;
+	awaiting_plan_approval = false;
+	plan_approved = false;
+	pending_plan.clear();
+	propose_plan_tool_use_id = String();
+	if (registry.is_valid()) {
+		registry->set_active_role(String());
+	}
 
 	if (llm != nullptr) {
 		llm->cancel();
@@ -644,10 +727,19 @@ void AIOSPipeline::_abort(const String &p_code, const String &p_message) {
 	// Any executed step may have written to disk, and a rollback certainly did,
 	// so the editor is told to rescan whenever a run got as far as step one.
 	summary["filesystem_changed"] = steps_executed > 0;
+	if (memory.is_valid()) {
+		memory->add_failure("pipeline", p_message);
+		memory->record_run_finished(summary);
+	}
 	emit_signal("run_finished", summary);
 	stage = STAGE_IDLE;
 	clarifying = false;
 	awaiting_user = false;
+	awaiting_plan_approval = false;
+	plan_approved = false;
+	if (registry.is_valid()) {
+		registry->set_active_role(String());
+	}
 }
 
 /* -------------------------------------------------------------------------- */
@@ -699,6 +791,9 @@ void AIOSPipeline::_on_model_response(const Dictionary &p_response) {
 		summary["message"] = steps_executed > 0
 				? "Run finished after " + String::num_int64(steps_executed) + " step(s)."
 				: String("Run finished without changing anything.");
+		if (memory.is_valid()) {
+			memory->record_run_finished(summary);
+		}
 		emit_signal("run_finished", summary);
 		return;
 	}
@@ -720,6 +815,7 @@ void AIOSPipeline::_on_model_failed(const Dictionary &p_error) {
 void AIOSPipeline::_handle_tool_calls(const Array &p_calls) {
 	pending_results.clear();
 	deferred_calls.clear();
+	batch_had_mutations = false;
 
 	// One snapshot per batch, not per call. A model routinely emits several
 	// calls that only make sense together (create a node, then attach its
@@ -747,8 +843,22 @@ void AIOSPipeline::_handle_tool_calls(const Array &p_calls) {
 
 	for (int i = 0; i < p_calls.size(); i++) {
 		Dictionary call = p_calls[i];
+		const String tool = String(call.get("name", ""));
 
-		if (awaiting_playtest || awaiting_user) {
+		if (require_plan_approval && !plan_approved && AIOSToolRegistry::is_mutating(tool) && tool != "save_scene") {
+			_set_stage(STAGE_AWAITING_APPROVAL, "mutating tools blocked until plan approval");
+			Dictionary details;
+			details["tool"] = tool;
+			const String id = String(call.get("id", ""));
+			Dictionary envelope = AIOSJson::error("plan_approval_required",
+					"Call propose_plan and wait for the human to approve before mutating the project.",
+					details);
+			emit_signal("tool_completed", tool, false, envelope);
+			_push_result(id, envelope["error"], true);
+			continue;
+		}
+
+		if (awaiting_playtest || awaiting_user || awaiting_plan_approval) {
 			// Everything after a playtest or an ask_user call waits for the
 			// human/runtime to finish — continuing would change the world under
 			// an answer that has not arrived yet.
@@ -758,7 +868,7 @@ void AIOSPipeline::_handle_tool_calls(const Array &p_calls) {
 		_execute_call(call);
 	}
 
-	if (!awaiting_playtest && !awaiting_user) {
+	if (!awaiting_playtest && !awaiting_user && !awaiting_plan_approval) {
 		_finish_turn();
 	}
 }
@@ -779,6 +889,20 @@ void AIOSPipeline::_execute_call(const Dictionary &p_call) {
 		Dictionary envelope = AIOSJson::error("brief_required",
 				"Build tools are locked until you finish interviewing the human and call commit_brief. "
 				"Use ask_user for remaining questions, or commit_brief if you already have enough detail.",
+				details);
+		emit_signal("tool_completed", tool, false, envelope);
+		_push_result(id, envelope["error"], true);
+		return;
+	}
+
+	// Role gate for built-in agent modes.
+	if (!AIOSToolRegistry::is_allowed_for_role(tool, mode)) {
+		_set_stage(STAGE_REPAIRING, tool + " forbidden for " + mode + " mode");
+		Dictionary details;
+		details["role"] = mode;
+		details["tool"] = tool;
+		Dictionary envelope = AIOSJson::error("role_forbidden",
+				"The '" + mode + "' role cannot call '" + tool + "'. Switch mode or use a permitted tool.",
 				details);
 		emit_signal("tool_completed", tool, false, envelope);
 		_push_result(id, envelope["error"], true);
@@ -853,6 +977,56 @@ void AIOSPipeline::_execute_call(const Dictionary &p_call) {
 		return;
 	}
 
+	// --- propose_plan pauses for human approval ------------------------------
+	if (tool == "propose_plan") {
+		Dictionary envelope = registry->call_tool(tool, params);
+		const bool ok = envelope.has("ok") && (bool)envelope["ok"];
+		emit_signal("tool_completed", tool, ok, envelope);
+		if (!ok) {
+			_push_result(id, envelope["error"], true);
+			return;
+		}
+
+		Dictionary result = envelope["result"];
+		pending_plan = result;
+		propose_plan_tool_use_id = id;
+		awaiting_plan_approval = true;
+		plan_approved = false;
+
+		String diff_preview;
+		if (git.is_valid() && git->is_available()) {
+			Dictionary diff = git->diff_working_tree(120);
+			if ((bool)diff["ok"]) {
+				Dictionary diff_result = diff["result"];
+				const String stat = String(diff_result.get("stat", ""));
+				const String diff_text = String(diff_result.get("diff", ""));
+				diff_preview = stat;
+				if (!diff_text.is_empty()) {
+					diff_preview += "\n\n" + diff_text;
+				}
+				if (diff_preview.is_empty()) {
+					diff_preview = "(no uncommitted changes on disk yet)";
+				}
+			}
+		} else {
+			diff_preview = "(git unavailable — diff preview skipped)";
+		}
+
+		_set_stage(STAGE_AWAITING_APPROVAL, "waiting for plan approval");
+		emit_signal("plan_proposed", result, diff_preview);
+
+		String visible = "**Proposed plan**\n\n" + String(result.get("summary", "")) + "\n\nSteps:\n";
+		Array steps = result.get("steps", Array());
+		for (int i = 0; i < steps.size(); i++) {
+			visible += String::num_int64(i + 1) + ". " + String(steps[i]) + "\n";
+		}
+		visible += "\nPress **Approve Plan** to let the agent proceed, or reply with changes.";
+		emit_signal("agent_message", visible);
+		emit_signal("pipeline_log", "info", "Plan submitted. Approve it in the dock to unlock mutating tools.");
+		_push_result(id, result, false);
+		return;
+	}
+
 	// --- commit_brief unlocks the build phase ------------------------------
 	if (tool == "commit_brief") {
 		Dictionary envelope = registry->call_tool(tool, params);
@@ -893,6 +1067,9 @@ void AIOSPipeline::_execute_call(const Dictionary &p_call) {
 
 	if (ok) {
 		steps_executed++;
+		if (AIOSToolRegistry::is_mutating(tool)) {
+			batch_had_mutations = true;
+		}
 		_push_result(id, envelope["result"], false);
 	} else {
 		_push_result(id, envelope["error"], true);
@@ -998,6 +1175,24 @@ void AIOSPipeline::_finish_turn() {
 	// --- success -----------------------------------------------------------
 	repair_attempts = 0;
 
+	// Auto-playtest after a mutating batch so the Observe stage is not skipped
+	// when the model forgets to call run_playtest.
+	if (auto_playtest && batch_had_mutations && playtest.is_valid() && !awaiting_playtest) {
+		_set_stage(STAGE_PLAYTESTING, "auto smoke test after edits");
+		Dictionary play_params;
+		play_params["timeout_sec"] = 20;
+		Dictionary launched = playtest->start(play_params);
+		if ((bool)launched["ok"]) {
+			awaiting_playtest = true;
+			playtest_tool_use_id = "__auto_playtest__";
+			batch_had_mutations = false;
+			emit_signal("pipeline_log", "info", "Running automatic playtest after mutating edits.");
+			return;
+		}
+		emit_signal("pipeline_log", "warn",
+				"Auto-playtest could not start: " + String(Dictionary(launched["error"])["message"]));
+	}
+
 	if (git.is_valid() && git->is_available() && steps_executed > 0) {
 		Dictionary checkpoint = git->create_checkpoint("agent step " + String::num_int64(steps_executed));
 		if ((bool)checkpoint["ok"]) {
@@ -1017,6 +1212,9 @@ void AIOSPipeline::_finish_turn() {
 		summary["steps_executed"] = steps_executed;
 		summary["filesystem_changed"] = steps_executed > 0;
 		summary["message"] = "Run finished after " + String::num_int64(steps_executed) + " step(s).";
+		if (memory.is_valid()) {
+			memory->record_run_finished(summary);
+		}
 		emit_signal("run_finished", summary);
 		return;
 	}
@@ -1030,6 +1228,7 @@ void AIOSPipeline::_on_playtest_finished(const Dictionary &p_report) {
 	if (!awaiting_playtest) {
 		return; // A manual playtest, not one the pipeline asked for.
 	}
+	const bool is_auto = playtest_tool_use_id == "__auto_playtest__";
 	awaiting_playtest = false;
 
 	const String outcome = String(p_report["outcome"]);
@@ -1037,16 +1236,28 @@ void AIOSPipeline::_on_playtest_finished(const Dictionary &p_report) {
 
 	emit_signal("pipeline_log", failed ? "error" : "success", String(p_report["summary"]));
 
-	// The report goes back as the tool result, formatted for a model rather
-	// than for a log viewer.
-	Dictionary block;
-	block["type"] = "tool_result";
-	block["tool_use_id"] = playtest_tool_use_id;
-	block["content"] = build_playtest_feedback(p_report);
-	if (failed) {
-		block["is_error"] = true;
+	if (is_auto) {
+		playtest_tool_use_id = String();
+		Dictionary block;
+		block["type"] = "text";
+		block["text"] = "AUTO PLAYTEST (" + outcome + "):\n" + build_playtest_feedback(p_report);
+		pending_results.push_back(block);
+		if (failed && memory.is_valid()) {
+			memory->add_failure("run_playtest", String(p_report["summary"]), "Fix runtime errors before continuing.");
+		}
+	} else {
+		// The report goes back as the tool result, formatted for a model rather
+		// than for a log viewer.
+		Dictionary block;
+		block["type"] = "tool_result";
+		block["tool_use_id"] = playtest_tool_use_id;
+		block["content"] = build_playtest_feedback(p_report);
+		if (failed) {
+			block["is_error"] = true;
+		}
+		pending_results.push_back(block);
+		playtest_tool_use_id = String();
 	}
-	pending_results.push_back(block);
 
 	if (failed) {
 		repair_attempts++;
@@ -1075,6 +1286,11 @@ void AIOSPipeline::_on_playtest_finished(const Dictionary &p_report) {
 							" times in a row. Rollback is off (or failed), so the broken state was left on disk.");
 			return;
 		}
+	}
+
+	if (is_auto) {
+		_finish_turn();
+		return;
 	}
 
 	// Anything the model queued behind the playtest runs now, against a scene

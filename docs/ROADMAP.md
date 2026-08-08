@@ -106,16 +106,26 @@ Making it something other people can rely on.
   design brief; mutating tools stay withheld until then. Dock shows
   `CLARIFYING`, routes answers into the open interview, and offers
   **Skip & Build**.
-- Agent roles with distinct tool permissions (an Architect that cannot write
-  files; a Debugger that cannot delete)
-- Plan review: the agent proposes a sequence, the human approves it in the dock,
-  and only then does it execute
-- Diff preview in the dock before a batch of mutations lands
-- MCP server so any MCP-capable client connects with no adapter code
-- Asset pipeline tools — import, texture and audio handling
-- Per-project agent memory: what was tried, what broke, what the conventions are
-- Prebuilt binaries on GitHub Releases for Linux, macOS and Windows
-- CI: build matrix, headless integration tests against a real editor
+- [x] **Agent roles with distinct tool permissions** — architect / debugger /
+  playtester modes enforce allowlists in the pipeline and registry; coder has
+  full access.
+- [x] **Plan review** — `propose_plan` tool + `ai_agent_os/agent/require_plan_approval`
+  setting; dock shows the plan and git diff preview; **Approve Plan** unlocks
+  mutating tools.
+- [x] **Diff preview in the dock** — unified diff from `AIOSGitCheckpoint` shown
+  when a plan is proposed.
+- [x] **MCP server** — `clients/mcp/server.py` wraps the Python bridge for
+  Cursor and other MCP clients.
+- [x] **Asset pipeline tools** — `import_asset` copies images/audio into res://
+  and triggers import; world model lists assets under `filesystem.assets`.
+- [x] **Per-project agent memory** — conventions and failure history in
+  `.godot/ai_agent_os/memory.json`, injected into the system prompt.
+- [x] **Prebuilt binaries + CI** — GitHub Actions build matrix uploads per-OS
+  artifacts; headless smoke test exercises ping / world model over the bridge.
+- [x] **`auto_playtest` wired** — smoke playtest runs automatically after each
+  successful mutating batch when enabled.
+- [x] **Driver lock (partial)** — IPC mutating calls rejected while the built-in
+  pipeline is active.
 
 ---
 

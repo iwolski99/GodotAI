@@ -197,20 +197,29 @@ are watching a dock, not a log file, and they can stop you at any point.
 
 ## Model Context Protocol
 
-There is no MCP server in this repo yet. Writing one is a thin wrapper — the
-tool schemas are already JSON Schema, and `session_ready` hands you the whole
-manifest at runtime, so an MCP server is roughly:
+An MCP server ships at `clients/mcp/server.py`. It forwards every tool from the
+editor bridge to any MCP-capable client (including Cursor).
 
-```python
-mcp_tools = [
-    types.Tool(name=t["name"], description=t["summary"], inputSchema=t["input_schema"])
-    for t in godot.tools.values()
-]
-# ... and forward call_tool straight through to godot.call()
+```bash
+pip install -r clients/mcp/requirements.txt
+python3 clients/mcp/server.py /path/to/your-project
 ```
 
-If you build one, a pull request would be welcome — see
-[CONTRIBUTING.md](../CONTRIBUTING.md).
+Add to `.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "godot-ai-os": {
+      "command": "python3",
+      "args": ["/path/to/GodotAI/clients/mcp/server.py", "/path/to/your-project"]
+    }
+  }
+}
+```
+
+The Godot editor must be running with the plugin enabled. Tool schemas come from
+`session_ready` at connect time — no manual manifest maintenance.
 
 ---
 

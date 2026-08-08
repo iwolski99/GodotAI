@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "import_asset",
+  "title": "import_asset",
+  "description": "Copy an image or audio file from disk into res:// and queue it for Godot's import pipeline. Returns the res:// path to use in node properties (e.g. Sprite2D.texture).",
+  "mutating": true,
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "source_path": {
+      "type": "string",
+      "description": "Absolute path to the file on disk."
+    },
+    "dest_path": {
+      "type": "string",
+      "pattern": "^res://.+",
+      "description": "Destination under res://. Defaults to res://assets/<filename>."
+    },
+    "dry_run": {
+      "type": "boolean",
+      "default": false,
+      "description": "Validate and report what would happen without copying."
+    }
+  },
+  "required": ["source_path"],
+  "errors": {
+    "missing_parameter": "source_path is required.",
+    "file_not_found": "The source file does not exist.",
+    "unsupported_format": "Extension not in png, jpg, jpeg, webp, svg, wav, ogg, mp3.",
+    "invalid_path": "dest_path must start with res://.",
+    "extension_mismatch": "Destination extension must match the source file.",
+    "already_exists": "A file already exists at dest_path.",
+    "copy_failed": "Could not copy the file into the project.",
+    "mkdir_failed": "Could not create the destination directory."
+  }
+}

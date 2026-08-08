@@ -88,6 +88,7 @@ void AIOSGitCheckpoint::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("rollback_last"), &AIOSGitCheckpoint::rollback_last);
 	ClassDB::bind_method(D_METHOD("list_checkpoints"), &AIOSGitCheckpoint::list_checkpoints);
 	ClassDB::bind_method(D_METHOD("get_status"), &AIOSGitCheckpoint::get_status);
+	ClassDB::bind_method(D_METHOD("diff_working_tree", "max_lines"), &AIOSGitCheckpoint::diff_working_tree);
 
 	ADD_SIGNAL(MethodInfo("checkpoint_created", PropertyInfo(Variant::STRING, "sha"), PropertyInfo(Variant::STRING, "label")));
 	ADD_SIGNAL(MethodInfo("rolled_back", PropertyInfo(Variant::STRING, "sha"), PropertyInfo(Variant::STRING, "label")));
@@ -375,5 +376,42 @@ Dictionary AIOSGitCheckpoint::rollback_last() {
 	result["label"] = label;
 	result["remaining_checkpoints"] = checkpoints.size();
 	result["note"] = "Files on disk were reverted. Reload the scene in the editor to see the change.";
+	return AIOSJson::ok(result);
+}
+
+Dictionary AIOSGitCheckpoint::diff_working_tree(int p_max_lines) const {
+	if (!is_available()) {
+		return AIOSJson::error("git_unavailable", "No git work tree at " + repo_path + ".");
+	}
+
+	PackedStringArray stat_args;
+	stat_args.push_back("diff");
+	stat_args.push_back("--stat");
+	stat_args.push_back("HEAD");
+	Dictionary stat_res = _run_git(stat_args);
+	const String stat = String(stat_res["output"]).strip_edges();
+
+	PackedStringArray diff_args;
+	diff_args.push_back("diff");
+	diff_args.push_back("HEAD");
+	Dictionary diff_res = _run_git(diff_args);
+	String diff = String(diff_res["output"]);
+
+	const bool truncated = p_max_lines > 0 && diff.count("\n") > p_max_lines;
+	if (truncated) {
+		PackedStringArray lines = diff.split("\n", false);
+		diff = "";
+		const int limit = MIN(lines.size(), p_max_lines);
+		for (int i = 0; i < limit; i++) {
+			diff += lines[i] + "\n";
+		}
+		diff += "\n... (diff truncated at " + String::num_int64(p_max_lines) + " lines)\n";
+	}
+
+	Dictionary result;
+	result["stat"] = stat;
+	result["diff"] = diff.strip_edges();
+	result["has_changes"] = !stat.is_empty() || !String(result["diff"]).is_empty();
+	result["truncated"] = truncated;
 	return AIOSJson::ok(result);
 }

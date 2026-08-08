@@ -6,6 +6,7 @@
 #pragma once
 
 #include "../agent/aios_llm_client.h"
+#include "../agent/aios_agent_memory.h"
 #include "../playtest/aios_playtest.h"
 #include "../tools/aios_tool_registry.h"
 #include "../vcs/aios_git_checkpoint.h"
@@ -54,6 +55,7 @@ public:
 		STAGE_EXECUTING,
 		STAGE_PLAYTESTING,
 		STAGE_REPAIRING,
+		STAGE_AWAITING_APPROVAL,
 		STAGE_ERROR,
 	};
 
@@ -88,6 +90,7 @@ private:
 	bool auto_playtest = true;
 	bool auto_rollback = true;
 	bool require_brief = true;
+	bool require_plan_approval = false;
 
 	// Clarification interview: withheld build tools until commit_brief.
 	bool clarifying = false;
@@ -96,6 +99,17 @@ private:
 	String ask_user_tool_use_id;
 	Dictionary pending_questions;
 	Dictionary committed_brief;
+
+	// Plan review: mutating tools blocked until the human approves propose_plan.
+	bool awaiting_plan_approval = false;
+	bool plan_approved = false;
+	Dictionary pending_plan;
+	String propose_plan_tool_use_id;
+
+	// Tracks whether the current tool batch changed the project (for auto_playtest).
+	bool batch_had_mutations = false;
+
+	Ref<AIOSAgentMemory> memory;
 
 	void _set_stage(Stage p_stage, const String &p_detail);
 	void _handle_tool_calls(const Array &p_calls);
@@ -106,6 +120,7 @@ private:
 
 	void _apply_tools_for_phase();
 	bool _mode_requires_brief(const String &p_mode) const;
+	String _memory_block() const;
 	void _enter_build_phase(const Dictionary &p_brief, bool p_skipped_interview);
 	static String _format_brief(const Dictionary &p_brief);
 	static Dictionary _minimal_brief_from_goal(const String &p_goal);
@@ -132,6 +147,8 @@ public:
 	void set_auto_playtest(bool p_enabled) { auto_playtest = p_enabled; }
 	void set_auto_rollback(bool p_enabled) { auto_rollback = p_enabled; }
 	void set_require_brief(bool p_enabled) { require_brief = p_enabled; }
+	void set_require_plan_approval(bool p_enabled) { require_plan_approval = p_enabled; }
+	void set_memory(const Ref<AIOSAgentMemory> &p_memory) { memory = p_memory; }
 
 	// Kicks off a run. Returns an error envelope if preconditions fail.
 	Dictionary start(const String &p_goal, const String &p_mode);
@@ -142,6 +159,9 @@ public:
 	// Skip the interview: synthesise a minimal brief from the original goal and
 	// unlock build tools. Used by the dock's "Skip & Build" action.
 	Dictionary skip_clarification_and_build();
+
+	// Approve a proposed plan and tell the model to proceed with mutations.
+	Dictionary approve_plan();
 
 	// Aborts. Leaves the project as-is; the human decides whether to roll back.
 	void stop();
@@ -155,9 +175,13 @@ public:
 
 	bool is_clarifying() const { return clarifying && !brief_ready; }
 	bool is_awaiting_user() const { return awaiting_user; }
+	bool is_awaiting_plan_approval() const { return awaiting_plan_approval; }
+	bool is_running() const { return stage != STAGE_IDLE && stage != STAGE_ERROR; }
 	Dictionary get_committed_brief() const { return committed_brief; }
+	Dictionary get_pending_plan() const { return pending_plan; }
 
 	// The system prompt handed to the model, assembled from the mode and the
 	// project's state.
-	static String build_system_prompt(const String &p_mode, bool p_git_available, bool p_clarifying = false);
+	static String build_system_prompt(const String &p_mode, bool p_git_available, bool p_clarifying = false,
+			const String &p_memory_block = String());
 };

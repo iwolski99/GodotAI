@@ -403,9 +403,22 @@ Dictionary AIOSWorldModel::_describe_filesystem(int p_max_entries) {
 	script_ext.push_back("cs");
 	scan_files("res://", script_ext, scripts, p_max_entries);
 
+	PackedStringArray assets;
+	PackedStringArray asset_ext;
+	asset_ext.push_back("png");
+	asset_ext.push_back("jpg");
+	asset_ext.push_back("jpeg");
+	asset_ext.push_back("webp");
+	asset_ext.push_back("svg");
+	asset_ext.push_back("wav");
+	asset_ext.push_back("ogg");
+	asset_ext.push_back("mp3");
+	scan_files("res://", asset_ext, assets, p_max_entries);
+
 	d["scenes"] = scenes;
 	d["scripts"] = scripts;
-	d["truncated"] = scenes.size() >= p_max_entries || scripts.size() >= p_max_entries;
+	d["assets"] = assets;
+	d["truncated"] = scenes.size() >= p_max_entries || scripts.size() >= p_max_entries || assets.size() >= p_max_entries;
 	return d;
 }
 

@@ -77,4 +77,8 @@ public:
 
 	Array list_checkpoints() const { return checkpoints; }
 	Dictionary get_status() const;
+
+	// Diff preview for the dock and plan-review gate. Returns truncated unified
+	// diff text suitable for display to a human.
+	Dictionary diff_working_tree(int p_max_lines = 200) const;
 };
