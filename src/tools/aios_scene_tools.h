@@ -30,6 +30,15 @@ public:
 	static Dictionary save_scene(const Dictionary &p_params);
 	static Dictionary open_scene(const Dictionary &p_params);
 
+	// --- Milestone 3: editing an existing project rather than only adding to it
+	static Dictionary set_node_properties(const Dictionary &p_params);
+	static Dictionary create_scene(const Dictionary &p_params);
+	static Dictionary reparent_node(const Dictionary &p_params);
+	static Dictionary connect_signal_safe(const Dictionary &p_params);
+	static Dictionary disconnect_signal_safe(const Dictionary &p_params);
+	static Dictionary read_script(const Dictionary &p_params);
+	static Dictionary patch_script(const Dictionary &p_params);
+
 	// Shared helpers, also used by the world model and the tool registry.
 	static Node *get_edited_root();
 	static void collect_owned_nodes(Node *p_node, Node *p_root, std::vector<Node *> &r_out);

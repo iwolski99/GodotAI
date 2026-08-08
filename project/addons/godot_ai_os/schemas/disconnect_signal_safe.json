@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "disconnect_signal_safe",
+  "title": "disconnect_signal_safe",
+  "description": "Removes a signal connection. Fails cleanly if the connection does not exist, rather than pretending it removed something. Call get_world_model with include_signals to see the connections a scene actually has.",
+  "mutating": true,
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["from", "signal", "to", "method"],
+  "properties": {
+    "from": { "type": "string" },
+    "signal": { "type": "string" },
+    "to": { "type": "string" },
+    "method": { "type": "string" },
+    "dry_run": { "type": "boolean", "default": false }
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "from": { "type": "string" },
+      "signal": { "type": "string" },
+      "to": { "type": "string" },
+      "method": { "type": "string" },
+      "disconnected": { "type": "boolean" }
+    }
+  },
+  "errors": {
+    "node_not_found": "No node at that path.",
+    "not_connected": "That connection does not exist."
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "set_node_properties",
+  "title": "set_node_properties",
+  "description": "Changes properties on a node that already exists. This is how you move, rotate, scale, resize, recolour or configure anything after it has been created — without it, every correction means deleting the node and rebuilding it. Values are coerced the same way create_node_safe coerces them: [64, 32] becomes a Vector2, \"#ff8800\" becomes a Color, a res:// path becomes a loaded Resource. Exported variables from an attached script are settable too, not just engine properties. Every property is validated before any of them is applied, so a bag with one bad value changes nothing.",
+  "mutating": true,
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["node", "properties"],
+  "properties": {
+    "node": { "type": "string", "description": "Path of the node to modify, relative to the scene root. \".\" is the root itself." },
+    "properties": { "type": "object", "description": "Property name to new value. Must not be empty." },
+    "dry_run": { "type": "boolean", "default": false, "description": "Validate and report the current values without changing anything." }
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "node": { "type": "string" },
+      "type": { "type": "string" },
+      "applied": { "type": "array", "items": { "type": "string" }, "description": "Properties whose value actually changed." },
+      "unchanged": { "type": "array", "items": { "type": "string" }, "description": "Properties that already held the requested value, or whose setter overrode it. Values are read back after writing rather than assumed." },
+      "previous": { "type": "object", "description": "The values before the call, so you can undo it yourself." }
+    }
+  },
+  "errors": {
+    "no_open_scene": "No scene is open in the editor.",
+    "node_not_found": "No node at that path.",
+    "node_not_editable": "The node belongs to an instanced sub-scene.",
+    "invalid_properties": "One or more values were rejected; nothing was changed. 'details.errors' names each one, with did_you_mean for typos."
+  }
+}

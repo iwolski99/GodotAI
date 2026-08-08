@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "reparent_node",
+  "title": "reparent_node",
+  "description": "Moves a node to a new parent, to a new sibling index, or both. Pass only 'index' to reorder within the current parent — which is how you fix 2D draw order or Control layout order without restructuring anything. The node's world transform is preserved by default: reparenting under a moved or rotated parent would otherwise teleport it, which looks exactly like the tool corrupted your scene. Scripts referencing the node by $Name or by path are reported, because moving a node is the most common way those references silently rot.",
+  "mutating": true,
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["node"],
+  "properties": {
+    "node": { "type": "string", "description": "Path of the node to move." },
+    "new_parent": { "type": "string", "description": "Path of the new parent. Omit to keep the current parent and only reorder." },
+    "index": { "type": "integer", "minimum": 0, "description": "New position among its siblings. Omit to append." },
+    "keep_global_transform": { "type": "boolean", "default": true, "description": "Preserve world position/rotation/scale across the move. Turn off only when you want the node to inherit the new parent's transform wholesale." },
+    "auto_rename": { "type": "boolean", "default": true, "description": "Rename on a name collision in the destination rather than failing." },
+    "dry_run": { "type": "boolean", "default": false }
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "node": { "type": "string", "description": "The node's new path." },
+      "previous_path": { "type": "string" },
+      "parent": { "type": "string" },
+      "index": { "type": "integer" },
+      "kept_global_transform": { "type": "boolean" },
+      "warnings": { "type": "array", "items": { "type": "string" } },
+      "script_references": { "type": "array", "description": "Places in project scripts that mention this node by name or path. Heuristic — evidence, not proof." }
+    }
+  },
+  "errors": {
+    "node_not_found": "No node at that path.",
+    "cannot_move_root": "The scene root has no parent.",
+    "cycle": "The proposed parent is inside the node being moved.",
+    "nothing_to_do": "Neither new_parent nor index was given.",
+    "name_conflict": "The destination already has a child with that name and auto_rename is off."
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "read_script",
+  "title": "read_script",
+  "description": "Reads a GDScript file and returns its source plus an index of every function and the line it starts on. Read before you patch: patch_script's replace_function needs a name that exists, and replace_text needs the text to match byte for byte including indentation. For a long file, use from_line/to_line to pull just the region you care about instead of spending context on the whole thing — the function index comes back regardless of the window, so you can locate a function and then fetch only it.",
+  "mutating": false,
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {
+    "path": { "type": "string", "pattern": "^res://.+", "description": "Script file to read." },
+    "node": { "type": "string", "description": "Alternative to 'path': read whatever script is attached to this node in the open scene." },
+    "from_line": { "type": "integer", "minimum": 1, "default": 1, "description": "First line to return (1-based, inclusive)." },
+    "to_line": { "type": "integer", "minimum": 1, "description": "Last line to return (inclusive). Omit for end of file." }
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "path": { "type": "string" },
+      "source": { "type": "string", "description": "The requested window of the file." },
+      "line_count": { "type": "integer", "description": "Total lines in the file, not just the window." },
+      "from_line": { "type": "integer" },
+      "to_line": { "type": "integer" },
+      "functions": {
+        "type": "array",
+        "description": "Every function in the whole file, regardless of the window.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "line": { "type": "integer" },
+            "signature": { "type": "string" }
+          }
+        }
+      }
+    }
+  },
+  "errors": {
+    "missing_parameter": "Neither 'path' nor 'node' was given.",
+    "file_not_found": "No file at that path.",
+    "no_script": "That node has no script attached.",
+    "built_in_script": "That node's script is embedded in the scene, not a file on disk."
+  }
+}

@@ -33,6 +33,8 @@ private:
 	Dictionary _describe_node(Node *p_node, Node *p_scene_root, const Dictionary &p_opts, int p_depth);
 	Dictionary _collect_properties(Node *p_node);
 	Array _collect_signals(Node *p_node, Node *p_scene_root);
+	// World-space position, rotation and bounds. Empty for non-spatial nodes.
+	static Dictionary _describe_spatial(Node *p_node);
 	Dictionary _describe_project();
 	Dictionary _describe_editor();
 	Dictionary _describe_filesystem(int p_max_entries);

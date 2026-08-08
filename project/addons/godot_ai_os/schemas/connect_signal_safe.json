@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "connect_signal_safe",
+  "title": "connect_signal_safe",
+  "description": "Connects a signal on one node to a method on another — body_entered to take_damage, pressed to start_game, timeout to spawn_enemy. Signals are how a Godot game is actually wired together; a scene with the right nodes and no connections looks correct and does nothing. Both ends are verified first: the signal must exist on the emitter and the method must exist on the receiver, because Godot itself refuses connections to missing methods at load time. So attach the receiver's script before connecting to it. The connection is made persistent, which is what makes Godot write it into the .tscn — without that it would vanish the next time the scene loaded.",
+  "mutating": true,
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["from", "signal", "to", "method"],
+  "properties": {
+    "from": { "type": "string", "description": "Path of the node that emits the signal." },
+    "signal": { "type": "string", "description": "Signal name, e.g. \"body_entered\". A typo comes back with did_you_mean." },
+    "to": { "type": "string", "description": "Path of the node whose method should run." },
+    "method": { "type": "string", "description": "Method name on the receiver. It must already exist." },
+    "one_shot": { "type": "boolean", "default": false, "description": "Disconnect automatically after the first emission." },
+    "deferred": { "type": "boolean", "default": false, "description": "Queue the call until idle time. Use when the handler modifies the scene tree during physics." },
+    "dry_run": { "type": "boolean", "default": false }
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "from": { "type": "string" },
+      "signal": { "type": "string" },
+      "to": { "type": "string" },
+      "method": { "type": "string" },
+      "connected": { "type": "boolean" },
+      "persistent": { "type": "boolean", "description": "Always true: the connection is saved with the scene." },
+      "warnings": { "type": "array", "items": { "type": "string" }, "description": "Non-blocking notes, such as the handler declaring more parameters than the signal emits." }
+    }
+  },
+  "errors": {
+    "node_not_found": "No node at the 'from' or 'to' path.",
+    "unknown_signal": "The emitter has no such signal; 'details.did_you_mean' lists near matches.",
+    "no_receiver_method": "The receiver has no such method. Attach or patch its script first.",
+    "already_connected": "That exact connection already exists."
+  }
+}

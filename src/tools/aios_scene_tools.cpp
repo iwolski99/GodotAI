@@ -15,6 +15,7 @@
 #include <godot_cpp/classes/global_constants.hpp>
 #include <godot_cpp/classes/packed_scene.hpp>
 #include <godot_cpp/classes/resource_loader.hpp>
+#include <godot_cpp/classes/resource_saver.hpp>
 #include <godot_cpp/classes/script.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
@@ -111,6 +112,84 @@ static Array closest_property_names(const Dictionary &p_known, const String &p_n
 	return suggestions;
 }
 
+// Coerces a JSON property bag against a class's real property table.
+//
+// This is shared by create_node_safe and set_node_properties on purpose. The two
+// tools disagreeing about whether `"position": [64, 32]` is acceptable would be a
+// genuinely maddening bug to hit, so there is one implementation and both call it.
+//
+// p_known empty means "we cannot introspect this class" (a PackedScene instance,
+// or a node whose script adds properties ClassDB does not list) — in that case
+// unknown names are passed through untyped rather than rejected.
+static bool coerce_property_bag(const Dictionary &p_requested,
+		const Dictionary &p_known,
+		const String &p_class_label,
+		Dictionary &r_resolved,
+		Array &r_errors) {
+	const bool introspectable = !p_known.is_empty();
+	Array keys = p_requested.keys();
+
+	for (int i = 0; i < keys.size(); i++) {
+		const String key = keys[i];
+
+		if (introspectable && !p_known.has(key)) {
+			Dictionary e;
+			e["property"] = key;
+			e["problem"] = "unknown property for " + p_class_label;
+			Array suggestions = closest_property_names(p_known, key);
+			if (suggestions.size() > 0) {
+				e["did_you_mean"] = suggestions;
+			}
+			r_errors.push_back(e);
+			continue;
+		}
+
+		int target_type = Variant::NIL;
+		if (p_known.has(key)) {
+			Dictionary info = p_known[key];
+			target_type = (int)(int64_t)info["type"];
+		}
+
+		Variant coerced;
+		String coerce_error;
+		if (!AIOSJson::coerce(p_requested[key], target_type, coerced, coerce_error)) {
+			Dictionary e;
+			e["property"] = key;
+			e["problem"] = coerce_error;
+			r_errors.push_back(e);
+			continue;
+		}
+		r_resolved[key] = coerced;
+	}
+
+	return r_errors.is_empty();
+}
+
+// The property table for a node as it actually is, which is not the same as the
+// table for its class: an attached script adds exported properties that ClassDB
+// knows nothing about, and refusing to set those would make the tool useless on
+// exactly the nodes an agent just built.
+static Dictionary node_property_types(Node *p_node) {
+	Dictionary out = class_property_types(p_node->get_class());
+
+	TypedArray<Dictionary> props = p_node->get_property_list();
+	for (int i = 0; i < props.size(); i++) {
+		Dictionary p = props[i];
+		const int64_t usage = p.has("usage") ? (int64_t)p["usage"] : 0;
+		if (usage & (PROPERTY_USAGE_GROUP | PROPERTY_USAGE_SUBGROUP | PROPERTY_USAGE_CATEGORY)) {
+			continue;
+		}
+		if (!(usage & PROPERTY_USAGE_EDITOR) && !(usage & PROPERTY_USAGE_STORAGE)) {
+			continue;
+		}
+		Dictionary info;
+		info["type"] = p.has("type") ? (int)(int64_t)p["type"] : 0;
+		info["hint_string"] = p.has("hint_string") ? String(p["hint_string"]) : String();
+		out[String(p["name"])] = info;
+	}
+	return out;
+}
+
 /* -------------------------------------------------------------------------- */
 /*  create_node_safe                                                           */
 /* -------------------------------------------------------------------------- */
@@ -192,39 +271,7 @@ Dictionary AIOSSceneTools::create_node_safe(const Dictionary &p_params) {
 
 	Dictionary resolved; // name -> coerced Variant
 	Array property_errors;
-	Array keys = requested.keys();
-	for (int i = 0; i < keys.size(); i++) {
-		const String key = keys[i];
-
-		if (instance_scene.is_empty() && !known.has(key)) {
-			Dictionary e;
-			e["property"] = key;
-			e["problem"] = "unknown property for " + type;
-			Array suggestions = closest_property_names(known, key);
-			if (suggestions.size() > 0) {
-				e["did_you_mean"] = suggestions;
-			}
-			property_errors.push_back(e);
-			continue;
-		}
-
-		int target_type = Variant::NIL;
-		if (known.has(key)) {
-			Dictionary info = known[key];
-			target_type = (int)(int64_t)info["type"];
-		}
-
-		Variant coerced;
-		String coerce_error;
-		if (!AIOSJson::coerce(requested[key], target_type, coerced, coerce_error)) {
-			Dictionary e;
-			e["property"] = key;
-			e["problem"] = coerce_error;
-			property_errors.push_back(e);
-			continue;
-		}
-		resolved[key] = coerced;
-	}
+	coerce_property_bag(requested, known, type, resolved, property_errors);
 
 	if (property_errors.size() > 0) {
 		Dictionary details;
@@ -836,6 +883,825 @@ Dictionary AIOSSceneTools::safe_delete_node(const Dictionary &p_params) {
 	report["deleted"] = true;
 	report["forced"] = force && !blockers.is_empty();
 	return AIOSJson::ok(report);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  read_script / patch_script                                                 */
+/* -------------------------------------------------------------------------- */
+
+// Until now the only way to change a script was attach_script_safe, which
+// rewrites the whole file from whatever the model remembered. That is fine for a
+// 20-line script and actively destructive for a 300-line one: anything the model
+// did not recall is silently deleted.
+//
+// read_script and patch_script replace that with read-modify-write on a named
+// region, so an edit to one function cannot lose another.
+Dictionary AIOSSceneTools::read_script(const Dictionary &p_params) {
+	String path = AIOSJson::get_string(p_params, "path", "");
+
+	// Convenience: name a node instead of a path and get whatever script it has.
+	if (path.is_empty()) {
+		const String node_path = AIOSJson::get_string(p_params, "node", "");
+		if (node_path.is_empty()) {
+			return AIOSJson::error("missing_parameter", "Pass either 'path' (res://...) or 'node'.");
+		}
+		Node *root = get_edited_root();
+		if (root == nullptr) {
+			return AIOSJson::error("no_open_scene", "No scene is open, so 'node' cannot be resolved.");
+		}
+		Node *node = AIOSWorldModel::resolve_node(root, node_path);
+		if (node == nullptr) {
+			return AIOSJson::error("node_not_found", "No node at '" + node_path + "'.");
+		}
+		Ref<Script> script = node->get_script();
+		if (script.is_null()) {
+			return AIOSJson::error("no_script", "'" + node_path + "' has no script attached.");
+		}
+		path = script->get_path();
+		if (path.is_empty()) {
+			return AIOSJson::error("built_in_script",
+					"'" + node_path + "' has a built-in script with no file on disk. This tool only reads .gd files.");
+		}
+	}
+
+	if (!FileAccess::file_exists(path)) {
+		return AIOSJson::error("file_not_found", "No file at '" + path + "'.");
+	}
+
+	const String source = FileAccess::get_file_as_string(path);
+	PackedStringArray lines = source.split("\n");
+
+	Dictionary result;
+	result["path"] = path;
+	result["line_count"] = lines.size();
+
+	// An optional window, so reading one function out of a long file does not
+	// cost the model the whole file in context.
+	const int64_t from_line = AIOSJson::get_int(p_params, "from_line", 1);
+	const int64_t to_line = AIOSJson::get_int(p_params, "to_line", 0);
+	const int start = (int)(from_line > 1 ? from_line - 1 : 0);
+	const int end = (int)(to_line > 0 && to_line < lines.size() ? to_line : lines.size());
+
+	String windowed;
+	for (int i = start; i < end; i++) {
+		windowed += lines[i];
+		if (i < end - 1) {
+			windowed += "\n";
+		}
+	}
+	result["source"] = windowed;
+	result["from_line"] = start + 1;
+	result["to_line"] = end;
+
+	// The function index is the map patch_script edits against, so an agent can
+	// go straight to "replace_function" without reading the body first.
+	Array functions;
+	for (int i = 0; i < lines.size(); i++) {
+		const String stripped = lines[i].strip_edges();
+		if (!stripped.begins_with("func ") && !stripped.begins_with("static func ")) {
+			continue;
+		}
+		const int name_start = stripped.find("func ") + 5;
+		const int paren = stripped.find("(", name_start);
+		if (paren < 0) {
+			continue;
+		}
+		Dictionary f;
+		f["name"] = stripped.substr(name_start, paren - name_start).strip_edges();
+		f["line"] = i + 1;
+		f["signature"] = stripped;
+		functions.push_back(f);
+	}
+	result["functions"] = functions;
+
+	return AIOSJson::ok(result);
+}
+
+// Finds the [start, end) line range of a GDScript function, using indentation to
+// find the end. GDScript is whitespace-delimited, so a function ends at the next
+// line that has content at or below the `func` keyword's own indentation.
+static bool find_function_range(const PackedStringArray &p_lines, const String &p_name, int &r_start, int &r_end) {
+	r_start = -1;
+	int base_indent = 0;
+
+	for (int i = 0; i < p_lines.size(); i++) {
+		const String line = p_lines[i];
+		const String stripped = line.strip_edges();
+		if (!stripped.begins_with("func ") && !stripped.begins_with("static func ")) {
+			continue;
+		}
+		const int name_start = stripped.find("func ") + 5;
+		const int paren = stripped.find("(", name_start);
+		if (paren < 0) {
+			continue;
+		}
+		if (stripped.substr(name_start, paren - name_start).strip_edges() != p_name) {
+			continue;
+		}
+		r_start = i;
+		base_indent = (int)(line.length() - line.lstrip("\t ").length());
+		break;
+	}
+
+	if (r_start < 0) {
+		return false;
+	}
+
+	r_end = p_lines.size();
+	for (int i = r_start + 1; i < p_lines.size(); i++) {
+		const String line = p_lines[i];
+		if (line.strip_edges().is_empty()) {
+			continue; // Blank lines belong to whatever follows them.
+		}
+		const int indent = (int)(line.length() - line.lstrip("\t ").length());
+		if (indent <= base_indent) {
+			r_end = i;
+			break;
+		}
+	}
+
+	// Trailing blank lines belong to the gap between functions, not the body.
+	while (r_end > r_start + 1 && p_lines[r_end - 1].strip_edges().is_empty()) {
+		r_end--;
+	}
+	return true;
+}
+
+Dictionary AIOSSceneTools::patch_script(const Dictionary &p_params) {
+	const String path = AIOSJson::get_string(p_params, "path", "");
+	if (path.is_empty()) {
+		return AIOSJson::error("missing_parameter", "'path' is required.");
+	}
+	if (!FileAccess::file_exists(path)) {
+		return AIOSJson::error("file_not_found",
+				"No file at '" + path + "'. Use attach_script_safe to create a new script.");
+	}
+
+	const String operation = AIOSJson::get_string(p_params, "operation", "");
+	const String original = FileAccess::get_file_as_string(path);
+	PackedStringArray lines = original.split("\n");
+
+	String patched;
+	Dictionary detail;
+
+	if (operation == "replace_function") {
+		const String function = AIOSJson::get_string(p_params, "function", "");
+		const String body = AIOSJson::get_string(p_params, "source", "");
+		if (function.is_empty() || body.is_empty()) {
+			return AIOSJson::error("missing_parameter",
+					"'replace_function' needs 'function' (the name) and 'source' (the complete replacement, including the func line).");
+		}
+		int start = 0;
+		int end = 0;
+		if (!find_function_range(lines, function, start, end)) {
+			return AIOSJson::error("function_not_found",
+					"No function named '" + function + "' in '" + path + "'. Call read_script to see what is there.");
+		}
+		String out;
+		for (int i = 0; i < start; i++) {
+			out += lines[i] + "\n";
+		}
+		out += body;
+		if (!body.ends_with("\n")) {
+			out += "\n";
+		}
+		for (int i = end; i < lines.size(); i++) {
+			out += lines[i];
+			if (i < lines.size() - 1) {
+				out += "\n";
+			}
+		}
+		patched = out;
+		detail["replaced_lines"] = String::num_int64(start + 1) + "-" + String::num_int64(end);
+
+	} else if (operation == "append") {
+		const String body = AIOSJson::get_string(p_params, "source", "");
+		if (body.is_empty()) {
+			return AIOSJson::error("missing_parameter", "'append' needs 'source'.");
+		}
+		patched = original;
+		if (!patched.ends_with("\n")) {
+			patched += "\n";
+		}
+		patched += "\n" + body;
+		if (!patched.ends_with("\n")) {
+			patched += "\n";
+		}
+		detail["appended_at_line"] = lines.size();
+
+	} else if (operation == "replace_text") {
+		const String find = AIOSJson::get_string(p_params, "find", "");
+		const String replace = AIOSJson::get_string(p_params, "replace", "");
+		if (find.is_empty()) {
+			return AIOSJson::error("missing_parameter", "'replace_text' needs 'find'.");
+		}
+		const int occurrences = original.count(find);
+		if (occurrences == 0) {
+			return AIOSJson::error("text_not_found",
+					"'" + path + "' does not contain that text. Whitespace and indentation must match exactly — "
+					"call read_script and copy the region verbatim.");
+		}
+		// Ambiguity is an error, not a coin flip: replacing the wrong one of
+		// three identical blocks is the kind of bug that surfaces an hour later.
+		if (occurrences > 1 && !AIOSJson::get_bool(p_params, "replace_all", false)) {
+			Dictionary details;
+			details["occurrences"] = occurrences;
+			return AIOSJson::error("ambiguous_match",
+					"That text appears " + String::num_int64(occurrences) + " times. Include more surrounding "
+					"context to make it unique, or pass replace_all: true.",
+					details);
+		}
+		patched = original.replace(find, replace);
+		detail["occurrences"] = occurrences;
+
+	} else {
+		return AIOSJson::error("unknown_operation",
+				"'operation' must be one of: replace_function, append, replace_text. Got '" + operation + "'.");
+	}
+
+	if (patched == original) {
+		return AIOSJson::error("no_change",
+				"The patch produced a file identical to the original. Nothing was written.");
+	}
+
+	// The whole point of this tool is that it cannot leave a broken script on
+	// disk, so the result is compiled in memory before anything is written.
+	Ref<Script> probe = ClassDBSingleton::get_singleton()->instantiate("GDScript");
+	if (probe.is_valid()) {
+		probe->set_source_code(patched);
+		if (probe->reload(false) != OK) {
+			Dictionary details;
+			details["operation"] = operation;
+			return AIOSJson::error("patch_would_not_compile",
+					"The patched script does not compile, so it was NOT written — '" + path + "' is unchanged. "
+					"The parser's message is in Godot's Output panel.",
+					details);
+		}
+	}
+
+	if (AIOSJson::get_bool(p_params, "dry_run", false)) {
+		Dictionary plan = detail;
+		plan["dry_run"] = true;
+		plan["path"] = path;
+		plan["operation"] = operation;
+		plan["compiles"] = true;
+		plan["new_line_count"] = patched.split("\n").size();
+		return AIOSJson::ok(plan);
+	}
+
+	Ref<FileAccess> file = FileAccess::open(path, FileAccess::WRITE);
+	if (file.is_null()) {
+		return AIOSJson::error("write_failed", "Could not open '" + path + "' for writing.");
+	}
+	file->store_string(patched);
+	file->close();
+
+	EditorInterface *ei = EditorInterface::get_singleton();
+	if (ei != nullptr && ei->get_resource_filesystem() != nullptr) {
+		ei->get_resource_filesystem()->update_file(path);
+	}
+
+	Dictionary result = detail;
+	result["path"] = path;
+	result["operation"] = operation;
+	result["compiles"] = true;
+	result["previous_line_count"] = lines.size();
+	result["new_line_count"] = patched.split("\n").size();
+	return AIOSJson::ok(result);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  connect_signal_safe / disconnect_signal_safe                               */
+/* -------------------------------------------------------------------------- */
+
+// Signals are how a Godot game is actually wired together: body_entered ->
+// take_damage, pressed -> start_game, timeout -> spawn. An agent that cannot
+// connect one can build a scene that looks right and does nothing.
+//
+// Connections are made with CONNECT_PERSIST, which is what makes Godot write
+// them into the .tscn. Without that flag the connection exists until the scene
+// reloads and then silently disappears — which would be a genuinely awful bug to
+// track down, because everything looks correct in the editor right up until it
+// does not.
+Dictionary AIOSSceneTools::connect_signal_safe(const Dictionary &p_params) {
+	Node *root = get_edited_root();
+	if (root == nullptr) {
+		return AIOSJson::error("no_open_scene", "No scene is currently open in the editor.");
+	}
+
+	const String from_path = AIOSJson::get_string(p_params, "from", "");
+	const String to_path = AIOSJson::get_string(p_params, "to", "");
+	const String signal_name = AIOSJson::get_string(p_params, "signal", "");
+	const String method_name = AIOSJson::get_string(p_params, "method", "");
+
+	if (from_path.is_empty() || to_path.is_empty() || signal_name.is_empty() || method_name.is_empty()) {
+		return AIOSJson::error("missing_parameter",
+				"'from', 'to', 'signal' and 'method' are all required.");
+	}
+
+	Node *from = AIOSWorldModel::resolve_node(root, from_path);
+	if (from == nullptr) {
+		return AIOSJson::error("node_not_found", "No node at '" + from_path + "' (the signal emitter).");
+	}
+	Node *to = AIOSWorldModel::resolve_node(root, to_path);
+	if (to == nullptr) {
+		return AIOSJson::error("node_not_found", "No node at '" + to_path + "' (the receiver).");
+	}
+
+	// --- does the signal exist? --------------------------------------------
+	if (!from->has_signal(StringName(signal_name))) {
+		Dictionary details;
+		Array available;
+		TypedArray<Dictionary> signals = from->get_signal_list();
+		for (int i = 0; i < signals.size(); i++) {
+			Dictionary s = signals[i];
+			const String candidate = s["name"];
+			if (candidate.similarity(signal_name) > 0.5f || candidate.contains(signal_name)) {
+				available.push_back(candidate);
+			}
+		}
+		if (available.size() > 0) {
+			details["did_you_mean"] = available;
+		}
+		details["emitter_type"] = from->get_class();
+		return AIOSJson::error("unknown_signal",
+				"'" + from->get_class() + "' has no signal named '" + signal_name + "'.", details);
+	}
+
+	// --- does the receiver have the method? --------------------------------
+	// A missing method is an error rather than a warning: Godot itself will
+	// refuse the connection at load time, so allowing it here would just move
+	// the failure somewhere less informative.
+	Array warnings;
+	if (!to->has_method(StringName(method_name))) {
+		Ref<Script> script = to->get_script();
+		Dictionary details;
+		details["receiver_type"] = to->get_class();
+		details["has_script"] = script.is_valid();
+		if (script.is_null()) {
+			return AIOSJson::error("no_receiver_method",
+					"'" + to_path + "' has no method '" + method_name + "' and no script attached. "
+					"Attach a script defining it with attach_script_safe first.",
+					details);
+		}
+		return AIOSJson::error("no_receiver_method",
+				"The script on '" + to_path + "' does not define '" + method_name + "'. "
+				"Add the method first — Godot refuses connections to methods that do not exist.",
+				details);
+	}
+
+	// --- argument-count sanity ---------------------------------------------
+	// Reported, not enforced: GDScript allows a handler to declare fewer
+	// parameters than the signal carries, and `binds` can add more.
+	{
+		TypedArray<Dictionary> signals = from->get_signal_list();
+		int signal_args = -1;
+		for (int i = 0; i < signals.size(); i++) {
+			Dictionary s = signals[i];
+			if (String(s["name"]) == signal_name) {
+				signal_args = ((Array)s["args"]).size();
+				break;
+			}
+		}
+		TypedArray<Dictionary> methods = to->get_method_list();
+		for (int i = 0; i < methods.size(); i++) {
+			Dictionary m = methods[i];
+			if (String(m["name"]) != method_name) {
+				continue;
+			}
+			const int method_args = ((Array)m["args"]).size();
+			if (signal_args >= 0 && method_args > signal_args) {
+				warnings.push_back("'" + method_name + "' takes " + String::num_int64(method_args) +
+						" argument(s) but '" + signal_name + "' emits " + String::num_int64(signal_args) +
+						". The extra parameters need default values or binds, or the call will fail at runtime.");
+			}
+			break;
+		}
+	}
+
+	const Callable callable = Callable(to, StringName(method_name));
+	if (from->is_connected(StringName(signal_name), callable)) {
+		return AIOSJson::error("already_connected",
+				"'" + from_path + "." + signal_name + "' is already connected to '" + to_path + "." + method_name + "'.");
+	}
+
+	Dictionary plan;
+	plan["from"] = AIOSWorldModel::node_path_in_scene(root, from);
+	plan["to"] = AIOSWorldModel::node_path_in_scene(root, to);
+	plan["signal"] = signal_name;
+	plan["method"] = method_name;
+	plan["warnings"] = warnings;
+
+	if (AIOSJson::get_bool(p_params, "dry_run", false)) {
+		plan["dry_run"] = true;
+		return AIOSJson::ok(plan);
+	}
+
+	uint32_t flags = Object::CONNECT_PERSIST;
+	if (AIOSJson::get_bool(p_params, "one_shot", false)) {
+		flags |= Object::CONNECT_ONE_SHOT;
+	}
+	if (AIOSJson::get_bool(p_params, "deferred", false)) {
+		flags |= Object::CONNECT_DEFERRED;
+	}
+
+	const Error err = from->connect(StringName(signal_name), callable, flags);
+	if (err != OK) {
+		return AIOSJson::error("connect_failed",
+				"Godot refused the connection (error " + String::num_int64(err) + ").");
+	}
+
+	mark_dirty();
+
+	Dictionary result = plan;
+	result["connected"] = true;
+	result["persistent"] = true;
+	return AIOSJson::ok(result);
+}
+
+Dictionary AIOSSceneTools::disconnect_signal_safe(const Dictionary &p_params) {
+	Node *root = get_edited_root();
+	if (root == nullptr) {
+		return AIOSJson::error("no_open_scene", "No scene is currently open in the editor.");
+	}
+
+	const String from_path = AIOSJson::get_string(p_params, "from", "");
+	const String to_path = AIOSJson::get_string(p_params, "to", "");
+	const String signal_name = AIOSJson::get_string(p_params, "signal", "");
+	const String method_name = AIOSJson::get_string(p_params, "method", "");
+
+	if (from_path.is_empty() || to_path.is_empty() || signal_name.is_empty() || method_name.is_empty()) {
+		return AIOSJson::error("missing_parameter",
+				"'from', 'to', 'signal' and 'method' are all required.");
+	}
+
+	Node *from = AIOSWorldModel::resolve_node(root, from_path);
+	Node *to = AIOSWorldModel::resolve_node(root, to_path);
+	if (from == nullptr) {
+		return AIOSJson::error("node_not_found", "No node at '" + from_path + "'.");
+	}
+	if (to == nullptr) {
+		return AIOSJson::error("node_not_found", "No node at '" + to_path + "'.");
+	}
+
+	const Callable callable = Callable(to, StringName(method_name));
+	if (!from->is_connected(StringName(signal_name), callable)) {
+		return AIOSJson::error("not_connected",
+				"'" + from_path + "." + signal_name + "' is not connected to '" + to_path + "." + method_name + "'. "
+				"Call get_world_model to see the connections that do exist.");
+	}
+
+	if (AIOSJson::get_bool(p_params, "dry_run", false)) {
+		Dictionary plan;
+		plan["dry_run"] = true;
+		plan["would_disconnect"] = from_path + String(".") + signal_name + String(" -> ") + to_path + String(".") + method_name;
+		return AIOSJson::ok(plan);
+	}
+
+	from->disconnect(StringName(signal_name), callable);
+	mark_dirty();
+
+	Dictionary result;
+	result["from"] = AIOSWorldModel::node_path_in_scene(root, from);
+	result["to"] = AIOSWorldModel::node_path_in_scene(root, to);
+	result["signal"] = signal_name;
+	result["method"] = method_name;
+	result["disconnected"] = true;
+	return AIOSJson::ok(result);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  reparent_node                                                              */
+/* -------------------------------------------------------------------------- */
+
+// Moving a node is where NodePath references quietly rot: every `$Sibling` and
+// every exported NodePath that pointed at the old location is now wrong. This
+// tool reports what it broke rather than pretending the move was free.
+Dictionary AIOSSceneTools::reparent_node(const Dictionary &p_params) {
+	Node *root = get_edited_root();
+	if (root == nullptr) {
+		return AIOSJson::error("no_open_scene", "No scene is currently open in the editor.");
+	}
+
+	const String node_path = AIOSJson::get_string(p_params, "node", "");
+	if (node_path.is_empty()) {
+		return AIOSJson::error("missing_parameter", "'node' is required.");
+	}
+	Node *node = AIOSWorldModel::resolve_node(root, node_path);
+	if (node == nullptr) {
+		return AIOSJson::error("node_not_found", "No node at '" + node_path + "'.");
+	}
+	if (node == root) {
+		return AIOSJson::error("cannot_move_root", "The scene root has no parent to move it under.");
+	}
+	if (node->get_owner() != root) {
+		return AIOSJson::error("node_not_editable",
+				"'" + node_path + "' belongs to an instanced sub-scene.");
+	}
+
+	Node *old_parent = node->get_parent();
+	const String old_path = AIOSWorldModel::node_path_in_scene(root, node);
+
+	// Reparenting is optional: with only `index` this is a pure reorder, which
+	// is how you fix draw order or Control layout without restructuring.
+	const String new_parent_path = AIOSJson::get_string(p_params, "new_parent", "");
+	Node *new_parent = old_parent;
+	if (!new_parent_path.is_empty()) {
+		new_parent = AIOSWorldModel::resolve_node(root, new_parent_path);
+		if (new_parent == nullptr) {
+			return AIOSJson::error("parent_not_found", "No node at '" + new_parent_path + "'.");
+		}
+		if (new_parent != root && new_parent->get_owner() != root) {
+			return AIOSJson::error("parent_not_editable",
+					"'" + new_parent_path + "' belongs to an instanced sub-scene.");
+		}
+		// A node cannot become its own ancestor's child.
+		for (Node *walk = new_parent; walk != nullptr; walk = walk->get_parent()) {
+			if (walk == node) {
+				return AIOSJson::error("cycle",
+						"'" + new_parent_path + "' is inside '" + node_path + "', so this move would make the node its own descendant.");
+			}
+		}
+	}
+
+	const int64_t index = AIOSJson::get_int(p_params, "index", -1);
+	const bool changing_parent = new_parent != old_parent;
+
+	if (!changing_parent && index < 0) {
+		return AIOSJson::error("nothing_to_do",
+				"Pass 'new_parent' to move the node, 'index' to reorder it, or both.");
+	}
+
+	// Name collision in the destination.
+	String name = node->get_name();
+	Array warnings;
+	if (changing_parent && new_parent->has_node(NodePath(name))) {
+		if (!AIOSJson::get_bool(p_params, "auto_rename", true)) {
+			return AIOSJson::error("name_conflict",
+					"'" + new_parent_path + "' already has a child named '" + name + "'.");
+		}
+		const String renamed = unique_child_name(new_parent, name);
+		warnings.push_back("'" + name + "' was taken in the new parent; renamed to '" + renamed + "'.");
+		name = renamed;
+	}
+
+	// Who points at this node by path?
+	Array references = find_script_references(node->get_name(), old_path, node->is_unique_name_in_owner());
+	if (references.size() > 0) {
+		warnings.push_back("Scripts reference this node by name or path; check them after the move.");
+	}
+
+	if (AIOSJson::get_bool(p_params, "dry_run", false)) {
+		Dictionary plan;
+		plan["dry_run"] = true;
+		plan["node"] = old_path;
+		plan["from_parent"] = AIOSWorldModel::node_path_in_scene(root, old_parent);
+		plan["to_parent"] = AIOSWorldModel::node_path_in_scene(root, new_parent);
+		plan["warnings"] = warnings;
+		plan["script_references"] = references;
+		return AIOSJson::ok(plan);
+	}
+
+	// keep_global_transform matters for anything spatial: reparenting a node
+	// under a transformed parent otherwise teleports it, which looks like the
+	// tool corrupted the scene.
+	const bool keep_transform = AIOSJson::get_bool(p_params, "keep_global_transform", true);
+
+	if (changing_parent) {
+		if (name != String(node->get_name())) {
+			node->set_name(name);
+		}
+		node->reparent(new_parent, keep_transform);
+		// reparent() preserves owner in 4.x, but a node whose owner was lost
+		// silently stops being saved, so this is not worth leaving to chance.
+		node->set_owner(root);
+	}
+
+	if (index >= 0) {
+		Node *parent_now = node->get_parent();
+		const int clamped = (int)(index < parent_now->get_child_count() ? index : parent_now->get_child_count() - 1);
+		parent_now->move_child(node, clamped);
+	}
+
+	mark_dirty();
+
+	Dictionary result;
+	result["node"] = AIOSWorldModel::node_path_in_scene(root, node);
+	result["previous_path"] = old_path;
+	result["parent"] = AIOSWorldModel::node_path_in_scene(root, node->get_parent());
+	result["index"] = node->get_index();
+	result["kept_global_transform"] = changing_parent ? keep_transform : true;
+	result["warnings"] = warnings;
+	if (references.size() > 0) {
+		result["script_references"] = references;
+	}
+	return AIOSJson::ok(result);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  set_node_properties                                                        */
+/* -------------------------------------------------------------------------- */
+
+// The counterpart to create_node_safe, and the tool that makes level building
+// possible at all: without it an agent can create a node but never move it, so
+// every mistake means delete-and-recreate.
+Dictionary AIOSSceneTools::set_node_properties(const Dictionary &p_params) {
+	Node *root = get_edited_root();
+	if (root == nullptr) {
+		return AIOSJson::error("no_open_scene", "No scene is currently open in the editor.");
+	}
+
+	const String node_path = AIOSJson::get_string(p_params, "node", "");
+	if (node_path.is_empty()) {
+		return AIOSJson::error("missing_parameter", "'node' is required: the path of the node to modify.");
+	}
+	Node *node = AIOSWorldModel::resolve_node(root, node_path);
+	if (node == nullptr) {
+		return AIOSJson::error("node_not_found",
+				"No node at '" + node_path + "'. Call get_world_model to see valid paths.");
+	}
+	if (node != root && node->get_owner() != root) {
+		return AIOSJson::error("node_not_editable",
+				"'" + node_path + "' belongs to an instanced sub-scene. Edit that scene directly, or enable editable children first.");
+	}
+
+	const Dictionary requested = AIOSJson::get_dict(p_params, "properties");
+	if (requested.is_empty()) {
+		return AIOSJson::error("missing_parameter", "'properties' is required and must not be empty.");
+	}
+
+	Dictionary resolved;
+	Array property_errors;
+	coerce_property_bag(requested, node_property_types(node), node->get_class(), resolved, property_errors);
+
+	if (property_errors.size() > 0) {
+		Dictionary details;
+		details["errors"] = property_errors;
+		return AIOSJson::error("invalid_properties",
+				"One or more properties were rejected; nothing was changed.", details);
+	}
+
+	// Capture the old values before touching anything, so the report says what
+	// actually changed rather than just what was asked for. An agent that set a
+	// property to the value it already had should be able to tell.
+	Array keys = resolved.keys();
+	Dictionary previous;
+	for (int i = 0; i < keys.size(); i++) {
+		const String key = keys[i];
+		previous[key] = AIOSJson::to_json(node->get(key));
+	}
+
+	Dictionary plan;
+	plan["node"] = AIOSWorldModel::node_path_in_scene(root, node);
+	plan["type"] = node->get_class();
+	plan["properties"] = keys;
+	plan["previous"] = previous;
+
+	if (AIOSJson::get_bool(p_params, "dry_run", false)) {
+		plan["dry_run"] = true;
+		return AIOSJson::ok(plan);
+	}
+
+	Array applied;
+	Array unchanged;
+	for (int i = 0; i < keys.size(); i++) {
+		const String key = keys[i];
+		const Variant before = node->get(key);
+		node->set(key, resolved[key]);
+		// Read it back rather than trusting the write: a setter can clamp, snap
+		// or ignore a value, and reporting "applied" for a value the node
+		// rejected would send the agent looking for the bug somewhere else.
+		const Variant after = node->get(key);
+		if (after == before) {
+			unchanged.push_back(key);
+		} else {
+			applied.push_back(key);
+		}
+	}
+
+	mark_dirty();
+
+	Dictionary result;
+	result["node"] = AIOSWorldModel::node_path_in_scene(root, node);
+	result["type"] = node->get_class();
+	result["applied"] = applied;
+	result["previous"] = previous;
+	if (unchanged.size() > 0) {
+		result["unchanged"] = unchanged;
+		result["note"] = "Some properties already held the requested value, or the node's setter overrode it. "
+						 "Read them back with get_world_model if that is unexpected.";
+	}
+	return AIOSJson::ok(result);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  create_scene                                                               */
+/* -------------------------------------------------------------------------- */
+
+// Without this an agent has exactly one scene to work in — whatever the human
+// happened to have open. Reusable prefabs (a Player, an Enemy, a Pickup) all
+// start here.
+Dictionary AIOSSceneTools::create_scene(const Dictionary &p_params) {
+	EditorInterface *ei = EditorInterface::get_singleton();
+	if (ei == nullptr) {
+		return AIOSJson::error("editor_unavailable", "This tool only works inside the Godot editor.");
+	}
+
+	String path = AIOSJson::get_string(p_params, "path", "");
+	if (path.is_empty()) {
+		return AIOSJson::error("missing_parameter", "'path' is required, e.g. 'res://scenes/player.tscn'.");
+	}
+	if (!path.begins_with("res://")) {
+		return AIOSJson::error("invalid_path", "'path' must start with res://. Got '" + path + "'.");
+	}
+	if (path.get_extension().to_lower() != "tscn") {
+		return AIOSJson::error("invalid_path", "Scene files must end in .tscn. Got '" + path + "'.");
+	}
+	if (FileAccess::file_exists(path) && !AIOSJson::get_bool(p_params, "overwrite", false)) {
+		return AIOSJson::error("already_exists",
+				"'" + path + "' already exists. Pass overwrite: true if you really mean to replace it.");
+	}
+
+	const String root_type = AIOSJson::get_string(p_params, "root_type", "Node2D");
+	if (!ClassDBSingleton::get_singleton()->class_exists(root_type)) {
+		return AIOSJson::error("unknown_type", "'" + root_type + "' is not a class known to this Godot build.");
+	}
+	if (!ClassDBSingleton::get_singleton()->is_parent_class(root_type, "Node")) {
+		return AIOSJson::error("not_a_node", "'" + root_type + "' is not a Node subclass.");
+	}
+	if (!ClassDBSingleton::get_singleton()->can_instantiate(root_type)) {
+		return AIOSJson::error("abstract_type", "'" + root_type + "' is abstract and cannot be instantiated.");
+	}
+
+	String root_name = AIOSJson::get_string(p_params, "root_name", "");
+	if (root_name.is_empty()) {
+		root_name = path.get_file().get_basename().capitalize().replace(" ", "");
+	}
+	String name_reason;
+	if (!is_valid_node_name(root_name, name_reason)) {
+		return AIOSJson::error("invalid_name", name_reason);
+	}
+
+	if (AIOSJson::get_bool(p_params, "dry_run", false)) {
+		Dictionary plan;
+		plan["dry_run"] = true;
+		plan["would_create"] = path;
+		plan["root_type"] = root_type;
+		plan["root_name"] = root_name;
+		return AIOSJson::ok(plan);
+	}
+
+	const String dir = path.get_base_dir();
+	if (!DirAccess::dir_exists_absolute(dir)) {
+		if (DirAccess::make_dir_recursive_absolute(dir) != OK) {
+			return AIOSJson::error("directory_failed", "Could not create '" + dir + "'.");
+		}
+	}
+
+	Variant created = ClassDBSingleton::get_singleton()->instantiate(root_type);
+	Node *root = Object::cast_to<Node>(created);
+	if (root == nullptr) {
+		return AIOSJson::error("instantiation_failed", "The engine refused to instantiate '" + root_type + "'.");
+	}
+	root->set_name(root_name);
+
+	Ref<PackedScene> packed;
+	packed.instantiate();
+	const Error packed_err = packed->pack(root);
+	if (packed_err != OK) {
+		memdelete(root);
+		return AIOSJson::error("pack_failed", "Could not pack the new scene (error " + String::num_int64(packed_err) + ").");
+	}
+
+	const Error save_err = ResourceSaver::get_singleton()->save(packed, path);
+	// The template node has done its job; the PackedScene holds its own copy.
+	memdelete(root);
+
+	if (save_err != OK) {
+		return AIOSJson::error("save_failed",
+				"Could not write '" + path + "' (error " + String::num_int64(save_err) + "). Check the path is writable.");
+	}
+
+	// Make the new file visible to the FileSystem dock and to ResourceLoader
+	// immediately — otherwise the very next instance_scene call cannot find it.
+	if (ei->get_resource_filesystem() != nullptr) {
+		ei->get_resource_filesystem()->update_file(path);
+	}
+
+	Dictionary result;
+	result["path"] = path;
+	result["root_type"] = root_type;
+	result["root_name"] = root_name;
+
+	if (AIOSJson::get_bool(p_params, "open", false)) {
+		ei->open_scene_from_path(path);
+		result["opened"] = true;
+	} else {
+		result["opened"] = false;
+		result["note"] = "The scene was written but not opened. Pass open: true to edit it now, "
+						 "or instance it into the current scene with create_node_safe's instance_scene.";
+	}
+	return AIOSJson::ok(result);
 }
 
 /* -------------------------------------------------------------------------- */

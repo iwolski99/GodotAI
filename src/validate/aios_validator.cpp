@@ -492,6 +492,76 @@ Dictionary AIOSValidator::validate_planned_call(const String &p_tool, const Dict
 			Dictionary ref_check = AIOSValidator::validate_node_references(source, node_path);
 			findings.append_array(Array(Dictionary(ref_check["result"])["findings"]));
 		}
+	} else if (p_tool == "set_node_properties") {
+		// Resolve the node's real class, then run the same property checks
+		// create_node_safe gets. Without this the Milestone 3 editing tools
+		// would sit outside the Validate stage entirely.
+		Node *root = AIOSSceneTools::get_edited_root();
+		const String node_path = AIOSJson::get_string(p_params, "node", "");
+		if (root != nullptr && !node_path.is_empty()) {
+			Node *node = AIOSWorldModel::resolve_node(root, node_path);
+			if (node == nullptr) {
+				_add(findings, "error", "node_not_found",
+						"No node at '" + node_path + "' in the open scene.");
+			} else {
+				Dictionary props = AIOSValidator::validate_properties(
+						node->get_class(), AIOSJson::get_dict(p_params, "properties"));
+				findings.append_array(Array(Dictionary(props["result"])["findings"]));
+			}
+		}
+	} else if (p_tool == "patch_script") {
+		// The tool compiles the patched result in memory before writing, but
+		// checking here too means a doomed patch is refused before it is even
+		// attempted, and the model gets the finding in the same shape as
+		// everything else.
+		const String path = AIOSJson::get_string(p_params, "path", "");
+		const String operation = AIOSJson::get_string(p_params, "operation", "");
+		if (path.is_empty()) {
+			_add(findings, "error", "missing_parameter", "'path' is required.");
+		} else if (!FileAccess::file_exists(path)) {
+			_add(findings, "error", "missing_script_file",
+					"No file at '" + path + "'. Use attach_script_safe to create a new script.");
+		}
+		if (operation != "replace_function" && operation != "append" && operation != "replace_text") {
+			_add(findings, "error", "unknown_operation",
+					"'operation' must be replace_function, append or replace_text. Got '" + operation + "'.");
+		}
+	} else if (p_tool == "connect_signal_safe") {
+		Node *root = AIOSSceneTools::get_edited_root();
+		if (root != nullptr) {
+			const String from_path = AIOSJson::get_string(p_params, "from", "");
+			const String to_path = AIOSJson::get_string(p_params, "to", "");
+			const String signal_name = AIOSJson::get_string(p_params, "signal", "");
+			const String method_name = AIOSJson::get_string(p_params, "method", "");
+
+			Node *from = from_path.is_empty() ? nullptr : AIOSWorldModel::resolve_node(root, from_path);
+			Node *to = to_path.is_empty() ? nullptr : AIOSWorldModel::resolve_node(root, to_path);
+
+			if (from == nullptr) {
+				_add(findings, "error", "node_not_found", "No node at '" + from_path + "' (the emitter).");
+			} else if (!signal_name.is_empty() && !from->has_signal(StringName(signal_name))) {
+				_add(findings, "error", "unknown_signal",
+						"'" + from->get_class() + "' has no signal named '" + signal_name + "'.");
+			}
+			if (to == nullptr) {
+				_add(findings, "error", "node_not_found", "No node at '" + to_path + "' (the receiver).");
+			} else if (!method_name.is_empty() && !to->has_method(StringName(method_name))) {
+				_add(findings, "error", "no_receiver_method",
+						"'" + to_path + "' has no method '" + method_name + "'. Godot refuses connections to "
+						"methods that do not exist, so add it before connecting.");
+			}
+		}
+	} else if (p_tool == "create_scene") {
+		const String path = AIOSJson::get_string(p_params, "path", "");
+		const String root_type = AIOSJson::get_string(p_params, "root_type", "Node2D");
+		if (!path.begins_with("res://") || path.get_extension().to_lower() != "tscn") {
+			_add(findings, "error", "invalid_path",
+					"'path' must be a res:// path ending in .tscn. Got '" + path + "'.");
+		}
+		if (!root_type.is_empty() && !ClassDBSingleton::get_singleton()->class_exists(root_type)) {
+			_add(findings, "error", "unknown_type",
+					"'" + root_type + "' is not a class known to this Godot build.");
+		}
 	} else if (p_tool == "safe_delete_node") {
 		// Deletion has its own dependency audit inside the tool; running it in
 		// dry-run mode here is both the cheapest and the most accurate check,

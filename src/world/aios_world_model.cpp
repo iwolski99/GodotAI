@@ -7,7 +7,11 @@
 #include "../util/aios_json.h"
 
 #include <godot_cpp/classes/class_db_singleton.hpp>
+#include <godot_cpp/classes/control.hpp>
 #include <godot_cpp/classes/dir_access.hpp>
+#include <godot_cpp/classes/node2d.hpp>
+#include <godot_cpp/classes/node3d.hpp>
+#include <godot_cpp/classes/visual_instance3d.hpp>
 #include <godot_cpp/classes/editor_interface.hpp>
 #include <godot_cpp/classes/editor_selection.hpp>
 #include <godot_cpp/classes/engine.hpp>
@@ -176,6 +180,82 @@ Dictionary AIOSWorldModel::_collect_properties(Node *p_node) {
 	return out;
 }
 
+// Where a node actually is, in world space.
+//
+// This exists because an agent building a level is doing spatial reasoning with
+// no eyes. `position` in the property dump is a *local* offset and is omitted
+// entirely when it equals the default, so a model reading the world model could
+// see a scene full of walls and have no idea where any of them were, whether
+// they overlapped, or how big they were.
+//
+// Rotations are reported in degrees rather than radians: every model has seen
+// far more "rotate 90 degrees" than "rotate 1.5708", and the conversion is a
+// reliable source of silent off-by-a-factor bugs.
+Dictionary AIOSWorldModel::_describe_spatial(Node *p_node) {
+	Dictionary out;
+
+	Node3D *n3d = Object::cast_to<Node3D>(p_node);
+	if (n3d != nullptr) {
+		out["space"] = "3d";
+		out["position"] = AIOSJson::to_json(n3d->get_global_position());
+		out["rotation_degrees"] = AIOSJson::to_json(n3d->get_rotation_degrees());
+		out["scale"] = AIOSJson::to_json(n3d->get_scale());
+		if (!n3d->is_visible()) {
+			out["visible"] = false;
+		}
+
+		// The bounding box is what makes "does this overlap that" answerable.
+		// get_aabb() is in local space, so it is transformed into world space
+		// here — an untransformed AABB on a moved node is worse than none.
+		VisualInstance3D *vis = Object::cast_to<VisualInstance3D>(p_node);
+		if (vis != nullptr) {
+			const AABB local = vis->get_aabb();
+			if (local.size != Vector3()) {
+				const AABB world = n3d->get_global_transform().xform(local);
+				Dictionary bounds;
+				bounds["min"] = AIOSJson::to_json(world.position);
+				bounds["max"] = AIOSJson::to_json(world.position + world.size);
+				bounds["size"] = AIOSJson::to_json(world.size);
+				bounds["center"] = AIOSJson::to_json(world.get_center());
+				out["bounds"] = bounds;
+			}
+		}
+		return out;
+	}
+
+	Control *control = Object::cast_to<Control>(p_node);
+	if (control != nullptr) {
+		// Controls come before Node2D deliberately: Control extends CanvasItem,
+		// not Node2D, and its rect is the useful thing rather than a position.
+		out["space"] = "ui";
+		const Rect2 rect = control->get_global_rect();
+		out["position"] = AIOSJson::to_json(rect.position);
+		out["size"] = AIOSJson::to_json(rect.size);
+		Dictionary bounds;
+		bounds["min"] = AIOSJson::to_json(rect.position);
+		bounds["max"] = AIOSJson::to_json(rect.position + rect.size);
+		out["bounds"] = bounds;
+		if (!control->is_visible()) {
+			out["visible"] = false;
+		}
+		return out;
+	}
+
+	Node2D *n2d = Object::cast_to<Node2D>(p_node);
+	if (n2d != nullptr) {
+		out["space"] = "2d";
+		out["position"] = AIOSJson::to_json(n2d->get_global_position());
+		out["rotation_degrees"] = n2d->get_global_rotation_degrees();
+		out["scale"] = AIOSJson::to_json(n2d->get_global_scale());
+		if (!n2d->is_visible()) {
+			out["visible"] = false;
+		}
+		return out;
+	}
+
+	return out; // Not a spatial node; nothing to say.
+}
+
 Array AIOSWorldModel::_collect_signals(Node *p_node, Node *p_scene_root) {
 	Array out;
 
@@ -254,6 +334,16 @@ Dictionary AIOSWorldModel::_describe_node(Node *p_node, Node *p_scene_root, cons
 	}
 	if (g.size() > 0) {
 		d["groups"] = g;
+	}
+
+	// On by default, unlike properties: this is small (one nested dict, only for
+	// spatial nodes) and it is the difference between an agent that can place a
+	// wall next to another wall and one that is guessing.
+	if (AIOSJson::get_bool(p_opts, "include_transforms", true)) {
+		Dictionary spatial = _describe_spatial(p_node);
+		if (!spatial.is_empty()) {
+			d["spatial"] = spatial;
+		}
 	}
 
 	if (AIOSJson::get_bool(p_opts, "include_properties", false)) {

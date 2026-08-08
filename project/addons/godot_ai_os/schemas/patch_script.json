@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "patch_script",
+  "title": "patch_script",
+  "description": "Edits part of an existing script without rewriting the whole file. Prefer this over attach_script_safe for any change to a script that already has content: attach_script_safe replaces the entire file with what you send, so anything you did not reproduce exactly is silently deleted. On a 300-line script that is destructive. The patched result is compiled in memory before anything is written, so a patch that would not parse is refused and the file on disk is left untouched. Always read_script first — replace_function needs a real function name, and replace_text matches exactly, including indentation (GDScript uses tabs).",
+  "mutating": true,
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path", "operation"],
+  "properties": {
+    "path": { "type": "string", "pattern": "^res://.+", "description": "Script to edit. It must already exist." },
+    "operation": {
+      "type": "string",
+      "enum": ["replace_function", "append", "replace_text"],
+      "description": "replace_function swaps one whole function, found by name and bounded by indentation — the safest option, and the one to reach for by default. append adds to the end of the file, for a new function. replace_text is a literal find/replace for edits that are not function-shaped."
+    },
+    "function": { "type": "string", "description": "replace_function only: the name of the function to replace." },
+    "source": { "type": "string", "description": "replace_function: the complete replacement including the 'func' line. append: the text to add." },
+    "find": { "type": "string", "description": "replace_text only: the exact text to find, whitespace included." },
+    "replace": { "type": "string", "description": "replace_text only: what to put there. Empty string deletes the matched text." },
+    "replace_all": { "type": "boolean", "default": false, "description": "replace_text only: allow more than one match. Without this, an ambiguous match is an error rather than a coin flip." },
+    "dry_run": { "type": "boolean", "default": false, "description": "Build and compile the patched result, report whether it parses, write nothing." }
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "path": { "type": "string" },
+      "operation": { "type": "string" },
+      "compiles": { "type": "boolean" },
+      "previous_line_count": { "type": "integer" },
+      "new_line_count": { "type": "integer" },
+      "replaced_lines": { "type": "string", "description": "replace_function: the line range that was swapped out." },
+      "occurrences": { "type": "integer", "description": "replace_text: how many matches were replaced." }
+    }
+  },
+  "errors": {
+    "file_not_found": "No file there. Use attach_script_safe to create a new script.",
+    "unknown_operation": "operation must be replace_function, append or replace_text.",
+    "function_not_found": "No function by that name; call read_script to see what exists.",
+    "text_not_found": "The find text does not appear. Whitespace must match exactly.",
+    "ambiguous_match": "The find text appears more than once. Add surrounding context or pass replace_all.",
+    "patch_would_not_compile": "The result does not parse. Nothing was written; the file is unchanged.",
+    "no_change": "The patch produced an identical file."
+  }
+}

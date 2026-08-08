@@ -29,6 +29,13 @@ static const ToolInfo TOOL_TABLE[] = {
 	{ "create_node_safe", "Instantiate a node under a parent with type-checked properties.", true },
 	{ "attach_script_safe", "Write a GDScript file and attach it to a node, verifying the base class first.", true },
 	{ "safe_delete_node", "Delete a node after auditing children, signals, NodePath properties and script references.", true },
+	{ "set_node_properties", "Change properties on an existing node: move it, resize it, retint it, set exported script variables.", true },
+	{ "reparent_node", "Move a node to a new parent and/or child index, preserving its world transform.", true },
+	{ "connect_signal_safe", "Wire a signal on one node to a method on another, verifying both exist.", true },
+	{ "disconnect_signal_safe", "Remove a signal connection.", true },
+	{ "create_scene", "Create a new .tscn file with a root node of the given type — the way to build a reusable prefab.", true },
+	{ "read_script", "Read a GDScript file with its function index, optionally windowed to a line range.", false },
+	{ "patch_script", "Edit part of a script (one function, an append, or a text replacement) without rewriting the whole file.", true },
 	{ "save_scene", "Persist the open scene to disk (required before checkpoints can capture scene edits).", true },
 	{ "open_scene", "Switch the editor to another scene so the other tools act on it.", false },
 	{ "validate_change", "Dry-run a planned tool call through the static checker without executing it.", false },
@@ -151,6 +158,20 @@ Dictionary AIOSToolRegistry::call_tool(const String &p_tool, const Dictionary &p
 		envelope = AIOSSceneTools::attach_script_safe(p_params);
 	} else if (p_tool == "safe_delete_node") {
 		envelope = AIOSSceneTools::safe_delete_node(p_params);
+	} else if (p_tool == "set_node_properties") {
+		envelope = AIOSSceneTools::set_node_properties(p_params);
+	} else if (p_tool == "reparent_node") {
+		envelope = AIOSSceneTools::reparent_node(p_params);
+	} else if (p_tool == "connect_signal_safe") {
+		envelope = AIOSSceneTools::connect_signal_safe(p_params);
+	} else if (p_tool == "disconnect_signal_safe") {
+		envelope = AIOSSceneTools::disconnect_signal_safe(p_params);
+	} else if (p_tool == "create_scene") {
+		envelope = AIOSSceneTools::create_scene(p_params);
+	} else if (p_tool == "read_script") {
+		envelope = AIOSSceneTools::read_script(p_params);
+	} else if (p_tool == "patch_script") {
+		envelope = AIOSSceneTools::patch_script(p_params);
 	} else if (p_tool == "save_scene") {
 		envelope = AIOSSceneTools::save_scene(p_params);
 	} else if (p_tool == "open_scene") {

@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "create_scene",
+  "title": "create_scene",
+  "description": "Creates a new .tscn file with a single root node. This is how you build a reusable prefab — a Player, an Enemy, a Pickup — that can then be instanced many times with create_node_safe's instance_scene parameter. The file is written to disk and registered with the editor's filesystem immediately, so it can be instanced on the very next call. By default the new scene is written but not opened, because opening it switches what every other scene tool acts on.",
+  "mutating": true,
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path"],
+  "properties": {
+    "path": { "type": "string", "pattern": "^res://.+\\.tscn$", "description": "Where to write it. Missing directories are created." },
+    "root_type": { "type": "string", "default": "Node2D", "description": "Class of the root node. Node2D for 2D, Node3D or CharacterBody3D for 3D, Control for UI." },
+    "root_name": { "type": "string", "description": "Name of the root node. Defaults to the filename in PascalCase." },
+    "open": { "type": "boolean", "default": false, "description": "Switch the editor to the new scene. Do this when you intend to build it out now; leave it false when you only need the file to exist so you can instance it." },
+    "overwrite": { "type": "boolean", "default": false, "description": "Replace the file if it already exists." },
+    "dry_run": { "type": "boolean", "default": false }
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "path": { "type": "string" },
+      "root_type": { "type": "string" },
+      "root_name": { "type": "string" },
+      "opened": { "type": "boolean" }
+    }
+  },
+  "errors": {
+    "invalid_path": "Not a res:// path, or not ending in .tscn.",
+    "already_exists": "A file is already there; pass overwrite.",
+    "unknown_type": "root_type is not a class in this Godot build.",
+    "abstract_type": "root_type cannot be instantiated.",
+    "save_failed": "The file could not be written."
+  }
+}
